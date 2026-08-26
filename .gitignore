@@ -1,0 +1,19 @@
+# Build output
+app/build/
+release/
+dist/
+
+# Generated at runtime beside the executable
+haptic_profiles.cfg
+console.log
+*.session
+
+# Local tool settings
+.claude/
+
+# Windows / editor noise
+Thumbs.db
+desktop.ini
+*.user
+.vs/
+.vscode/

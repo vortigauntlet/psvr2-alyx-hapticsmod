@@ -1,0 +1,35 @@
+THIRD PARTY NOTICES
+===================
+
+This project is independently authored and contains no third-party source code.
+
+It links at runtime against the PSVR2Toolkit CAPI, which is not distributed
+with this release and must be installed separately:
+
+  PSVR2Toolkit - https://github.com/BnuuySolutions/PSVR2Toolkit
+
+Reference material consulted (no code taken):
+
+  bHaptics Half-Life: Alyx integration
+  https://github.com/bhaptics/bhaptics-half-life-alyx
+  Used as a reference for Half-Life: Alyx game-event names and field keys,
+  and for the skill_manifest.cfg script-loading mechanism.
+
+  Scalable Init Support
+  https://gitlab.com/recursivenomad/scalable_init_support
+  The addon auto-load convention followed by the shipped gameinit.lua.
+
+
+A NOTE ON A PREVIOUS VERSION OF THIS FILE
+-----------------------------------------
+Earlier releases carried an attribution to HLA-NoVR-DualSense (GPL-3.0) "for
+the optional native state layer". That layer does not exist in this codebase
+and, by the look of the history, was removed some time ago; the notice was left
+behind. There is no AOB scanning, no signature matching, no process memory
+access and no injection anywhere in the source - `--uninstall` and a grep of
+app/src both bear that out.
+
+The stale notice is called out rather than silently deleted, because an
+incorrect GPL attribution invites people to conclude this project carries
+copyleft obligations it does not have, and quietly removing such a line looks
+worse than explaining it.
