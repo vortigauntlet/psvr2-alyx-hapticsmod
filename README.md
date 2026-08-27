@@ -4,7 +4,7 @@ Bespoke haptics and adaptive triggers for **Half-Life: Alyx** on **PSVR2 Sense
 controllers**, via the PSVR2Toolkit CAPI.
 
 No DLL injection. No pattern scanning. No patched Valve binaries.
-Headset rumble is deliberately not used.
+Headset rumble is deliberately not used (for now...)
 
 It does add one line to one Valve **text** file — see
 [How the game side loads](#how-the-game-side-loads). That is reversible and
