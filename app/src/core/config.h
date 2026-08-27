@@ -7,8 +7,16 @@
 namespace psvr2 {
 
 struct Config {
-    // Paths. Both are auto-detected when left blank.
+    // Which game this session is for: "alyx" or "hl2vr".
+    //
+    // Selected with --game, or by `game=` in the config file. Defaults to Alyx
+    // so every existing install and shortcut keeps behaving exactly as it did
+    // before the second integration existed.
+    std::string game = "alyx";
+
+    // Paths. All are auto-detected when left blank.
     std::string hlaPath;
+    std::string hl2vrPath;
     std::wstring toolkitDll;
 
     // Levels
@@ -73,11 +81,20 @@ struct Config {
 
     std::string consoleLogPath() const;
     std::string addonInstallPath() const;
+
+    // Half-Life 2 VR writes its console.log inside the mod's own game
+    // directory, not beside the executable.
+    std::string hl2vrConsoleLogPath() const;
+
+    // The game directory for whichever game is selected, for messages.
+    std::string gamePath() const;
+    bool isHl2vr() const { return game == "hl2vr"; }
 };
 
 // Steam / Half-Life: Alyx discovery, used by AutoDetect and the installer.
 std::string FindSteamRoot();
 std::string FindHalfLifeAlyx();
+std::string FindHalfLife2VR();
 std::wstring FindToolkitDll();
 
 } // namespace psvr2

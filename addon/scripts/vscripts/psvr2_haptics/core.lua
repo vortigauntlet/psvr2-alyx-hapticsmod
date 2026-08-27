@@ -18,7 +18,7 @@
 if not IsServer() then return end
 
 local TAG = "[PSVR2H]"
-local VERSION = "7.0"
+local VERSION = "7.1"
 
 --------------------------------------------------------------------------
 -- Reload-safe lifecycle
@@ -424,6 +424,24 @@ local HELD_MIN_SPEED  = 110
 local HELD_MIN_EXCESS = 95
 local HELD_COOLDOWN   = 0.10
 
+-- Threshold TUNING support.
+--
+-- The two numbers above have never been compared against a real swing. They
+-- are plausible placeholders, and the honest failure mode is invisible: if
+-- they are too HIGH, a real hit produces nothing at all and leaves nothing in
+-- the log to explain why. Logging only what passed can reveal false alarms but
+-- never misses, which is backwards - "I bashed it and felt nothing" is the
+-- more likely complaint.
+--
+-- So every near-miss is reported too, from floors set well BELOW the real
+-- thresholds. That puts the actual decision boundary in the middle of the
+-- recorded data instead of at its edge, which is the only way to see where the
+-- line should sit. Analyse a recording with --impacts.
+--
+-- These are diagnostic only. PHYS_CANDIDATE never produces a haptic.
+local CAND_MIN_SPEED  = 40
+local CAND_MIN_EXCESS = 15
+
 -- A gravity-glove catch lands the object in the hand a tick or two after the
 -- catch event itself. Inside this window an arrival is that catch completing,
 -- not a fresh manual pickup - which is what stops one catch reporting twice.
@@ -548,6 +566,18 @@ local function inspectHand(handId)
             local objDrop = h.lastSpeed - speed
             local handDrop = h.lastHandSpeed - handSpeed
             local excess = objDrop - handDrop
+
+            -- Reported before the decision, so the log records what was
+            -- CONSIDERED rather than only what was accepted.
+            if h.lastSpeed > CAND_MIN_SPEED and excess > CAND_MIN_EXCESS then
+                local passed = (h.lastSpeed > HELD_MIN_SPEED
+                    and excess > HELD_MIN_EXCESS
+                    and (now - h.lastImpact) > HELD_COOLDOWN) and 1 or 0
+                emit(string.format(
+                    "PHYS_CANDIDATE:%.1f,%.2f,%s,%.1f,%.1f,%.1f,%.1f,%d,%s",
+                    math.max(0, h.mass * excess), h.mass, side,
+                    h.lastSpeed, objDrop, handDrop, excess, passed, h.material))
+            end
 
             if h.lastSpeed > HELD_MIN_SPEED and excess > HELD_MIN_EXCESS
                 and (now - h.lastImpact) > HELD_COOLDOWN then

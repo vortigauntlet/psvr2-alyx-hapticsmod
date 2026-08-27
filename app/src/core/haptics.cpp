@@ -1,4 +1,4 @@
-#include "haptics.h"
+#include "core/haptics.h"
 
 #include <algorithm>
 #include <chrono>

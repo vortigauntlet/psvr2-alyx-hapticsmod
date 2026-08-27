@@ -129,6 +129,39 @@ echo.
 pause
 "@, $utf8)
 
+# Half-Life 2 VR. Shipped separately rather than as a switch on the Alyx
+# launcher, because the two need different things installed and a user who owns
+# one of the games should never be told to run something for the other.
+#
+# The measurement one is listed first on purpose: the Half-Life 2 VR game side
+# needs a plugin that has to be built from the Source SDK, so until that exists
+# the offline path is the only one that does anything, and it does a great deal.
+[System.IO.File]::WriteAllText("$release\Measure HL2VR Haptics (no headset).bat", @"
+@echo off
+title PSVR2 Haptics - Half-Life 2 VR offline measurement
+cd /d "%~dp0"
+echo Rendering every Half-Life 2 VR signature offline.
+echo No headset and no game required.
+echo.
+psvr2_alyx_haptics.exe --game hl2vr --verify
+echo.
+psvr2_alyx_haptics.exe --game hl2vr --analyze
+echo.
+pause
+"@, $utf8)
+
+[System.IO.File]::WriteAllText("$release\Start HL2VR Haptics.bat", @"
+@echo off
+title PSVR2 Haptics - Half-Life 2 VR
+cd /d "%~dp0"
+echo Half-Life 2 VR needs a game-side plugin that is built separately.
+echo If events never arrive, read docs\HL2VR.md first.
+echo.
+psvr2_alyx_haptics.exe --game hl2vr --launch
+echo.
+pause
+"@, $utf8)
+
 # --- zip + checksum ------------------------------------------------------
 # An unsigned executable downloaded from a forum deserves a checksum people can
 # actually verify, and a zip is what both Reddit and a GitHub release want.

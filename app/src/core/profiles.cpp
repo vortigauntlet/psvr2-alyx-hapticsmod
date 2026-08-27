@@ -1,4 +1,4 @@
-#include "profiles.h"
+#include "core/profiles.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -8,10 +8,20 @@
 namespace psvr2 {
 
 const char* const kProfileNames[] = {
+    // Half-Life: Alyx
     "PISTOL_FIRE", "SHOTGUN_FIRE", "SMG_FIRE", "GRENADE_FIRE",
     "MELEE_FIRE", "DEFAULT_FIRE",
     "GLOVE_LOCK", "GLOVE_PULL", "GLOVE_CATCH",
     "HURT",
+    // Half-Life 2 VR. Prefixed rather than shared, because the two games'
+    // weapons are different objects that happen to have similar names: an Alyx
+    // pistol and a Half-Life 2 pistol are laid out against completely different
+    // sets of neighbours, and forcing them to share a profile would mean tuning
+    // one could only ever damage the other.
+    "HL2_PISTOL_FIRE", "HL2_MAGNUM_FIRE", "HL2_SMG_FIRE", "HL2_AR2_FIRE",
+    "HL2_SHOTGUN_FIRE", "HL2_CROSSBOW_FIRE", "HL2_RPG_FIRE", "HL2_GRENADE_FIRE",
+    "HL2_DAMAGE", "HL2_DAMAGE_FIRE", "HL2_DAMAGE_SHOCK", "HL2_DAMAGE_TOXIC",
+    "HL2_EXPLOSION",
 };
 const int kProfileCount = static_cast<int>(sizeof(kProfileNames) / sizeof(kProfileNames[0]));
 
@@ -209,6 +219,132 @@ const std::vector<Builtin>& BuiltinTable() {
          {{"transient", 240, 0.30f, 18, 12, 0, 0, 0, 0, 0, 0},
           {"body", 130, 95, 0.79f, 190, 110, 0, 0, 0, 0, 0},
           {"texture", 300, 1.1f, 0.14f, 70, 50, 0, 0, 0, 0, 0}}},
+
+        // -------------------------------------------------------------------
+        // Half-Life 2 VR.
+        //
+        // SEVEN firing weapons against Alyx's three, which is a much harder
+        // placement problem and the reason these are laid out on a grid rather
+        // than tuned one at a time. Skin needs roughly a 1.5x ratio in duration
+        // OR in pitch before two vibrations read as different things at all, so
+        // with every weapon available at once and switchable at will, all
+        // twenty-one pairs have to clear that line.
+        //
+        //   weapon    dur   pitch   what carries it
+        //   smg        70    235    the shortest thing in the game
+        //   crossbow   95    430    the only shot with NO low-frequency energy
+        //   pistol    115    280    the middle rung, and the weapon fired most
+        //   ar2       200    330    fast tremolo: electrical, not mechanical
+        //   magnum    260    170    a violent crack, not a boom
+        //   shotgun   500     90    the long fall into the low lobe
+        //   rpg       620    150    the only shot whose pitch RISES
+        //
+        // The magnum deliberately does NOT go lowest. A .357 is higher pressure
+        // and shorter than a shotgun, and putting it down at 120 Hz for 430 ms
+        // - which is where "the most powerful handgun" first landed - collided
+        // with both the shotgun and the RPG at once. Moving it up and in is
+        // both more accurate and what buys the low end its room.
+        // -------------------------------------------------------------------
+
+        {"HL2_PISTOL_FIRE", "9mm. The middle rung, and the weapon fired most.",
+         {{"transient", 470, 0.34f, 10, 6, 0, 0, 0, 0, 0, 0},
+          {"body", 300, 265, 0.86f, 105, 50, 0, 0, 0, 0, 0}}},
+
+        {"HL2_MAGNUM_FIRE", ".357. A violent crack rather than a boom - high, hard and over.",
+         {{"transient", 260, 0.44f, 18, 11, 0, 0, 0, 0, 0, 0},
+          {"body", 195, 130, 0.92f, 240, 130, 0, 0, 0, 0, 0}}},
+
+        {"HL2_SMG_FIRE", "MP7. The SHORTEST thing in the game: a burst must read as a burst.",
+         // An SMG fires 13 times a second, so its character comes from the RATE
+         // of the shots and not from any one of them. Each round has to be over
+         // almost before it registers or a burst smears into one noise. Full
+         // amplitude despite the length: brevity is the signature, weakness is
+         // not - short-and-quiet is imperceptible, short-and-hard is a crack.
+         {{"transient", 420, 0.30f, 8, 5, 0, 0, 0, 0, 0, 0},
+          {"body", 245, 210, 0.88f, 62, 26, 0, 0, 0, 0, 0}}},
+
+        {"HL2_AR2_FIRE", "Pulse rifle. Electrical, not mechanical - carried by fast tremolo.",
+         // The one weapon in either game that is not a chemical explosion, and
+         // it gets the axis skin reads best to say so. A 38 Hz tremolo is a
+         // temporal pattern, which is far more legible than any pitch offset,
+         // and nothing else in Half-Life 2 shimmers like this.
+         {{"transient", 430, 0.28f, 9, 5, 0, 0, 0, 0, 0, 0},
+          {"body", 350, 310, 0.80f, 185, 90, 0.55f, 38.0f, 0, 0, 0}}},
+
+        {"HL2_SHOTGUN_FIRE", "The heaviest discharge: a long fall into the low lobe.",
+         // Level held down deliberately. At full amplitude this drove its own
+         // limiter hard, and what a limiter takes first is the sharp transient -
+         // so the heaviest weapon would pay for its weight by losing its edge.
+         // Weight comes from pitch and length, not from the last notch of level.
+         {{"transient", 200, 0.34f, 16, 10, 0, 0, 0, 0, 0, 0},
+          {"body", 160, 45, 0.76f, 470, 275, 0, 0, 0, 0, 0}}},
+
+        {"HL2_CROSSBOW_FIRE", "A bowstring, not a gunshot: NO low-frequency energy at all.",
+         // Every other weapon here puts its force at 150-300 Hz. This one has
+         // nothing below 350, which makes it unmistakable regardless of how the
+         // durations end up - a release of stored tension has no explosion
+         // behind it, and the absence is the identity.
+         {{"transient", 500, 0.44f, 9, 5, 0, 0, 0, 0, 0, 0},
+          {"body", 450, 400, 0.72f, 85, 38, 0, 0, 0, 0, 0},
+          {"texture", 380, 1.8f, 0.16f, 70, 40, 0, 0, 0, 0, 0}}},
+
+        {"HL2_RPG_FIRE", "The only shot whose pitch RISES - a rocket leaving and still going.",
+         // A rocket is not an impulse. The motor keeps pushing after it has
+         // left, so this is the one discharge that climbs and sustains instead
+         // of decaying, which no ratio can confuse with anything else.
+         {{"transient", 240, 0.34f, 14, 9, 0, 0, 0, 0, 0, 0},
+          {"body", 130, 175, 0.72f, 580, 320, 0.28f, 7.0f, 0, 0, 0},
+          {"texture", 220, 0.9f, 0.24f, 420, 260, 0, 0, 0, 0, 0}}},
+
+        {"HL2_GRENADE_FIRE", "A throw, not a discharge: a departure with no hard edge.",
+         // Moved down and lengthened off the pistol, which it was sitting on at
+         // 129 ms / 209 Hz against 112 ms / 268 Hz. Throwing and shooting are
+         // the two things a hand does most in this game and they must not be
+         // confusable; a release is slower and lower than a discharge, so the
+         // separation is also the more accurate shape.
+         {{"body", 110, 240, 0.34f, 150, 80, 0, 0, 0, 0, 0}}},
+
+        {"HL2_DAMAGE", "Scaled by how hard you were hit; these are the full-strength values.",
+         {{"transient", 300, 0.55f, 14, 9, 0, 0, 0, 0, 0, 0},
+          {"body", 175, 95, 0.85f, 195, 110, 0, 0, 0, 0, 0},
+          {"texture", 260, 0.9f, 0.30f, 140, 95, 0, 0, 0, 0, 0}}},
+
+        {"HL2_DAMAGE_FIRE", "Burning. A sustained scald with no impact in it at all.",
+         // Ported from the bHaptics Half-Life integration, which splits damage
+         // by SOURCE where this project splits it by what the arms feel.
+         // Nothing struck you, so there is no transient - that absence is most
+         // of what makes it read as burning rather than as being hit. What it
+         // has instead is length and a rough, uneven crackle.
+         {{"body", 200, 175, 0.62f, 520, 300, 0.45f, 11.0f, 22.0f, 31.0f, 0},
+          {"texture", 300, 0.7f, 0.30f, 480, 300, 0, 0, 0, 0, 0}}},
+
+        {"HL2_DAMAGE_SHOCK", "Electricity. The sharpest, brightest, shortest thing here.",
+         // The opposite of fire on every axis, which is how the two stay apart:
+         // instantaneous where fire sustains, bright where fire is mid, and
+         // carried by a very fast tremolo that nothing else in the game uses.
+         {{"transient", 500, 0.60f, 8, 4, 0, 0, 0, 0, 0, 0},
+          {"body", 430, 380, 0.78f, 95, 40, 0.65f, 55.0f, 0, 0, 0}}},
+
+        {"HL2_DAMAGE_TOXIC", "Poison. Slow, low and wrong - it arrives after the hit.",
+         // Headcrab poison and toxic sludge. The one damage type that is not an
+         // impact but a STATE, so it is the longest and lowest of the set and
+         // deliberately has a slow sickly wobble rather than an edge.
+         {{"body", 110, 92, 0.66f, 620, 380, 0.55f, 3.2f, 9.0f, 5.0f, 0},
+          {"texture", 170, 0.8f, 0.22f, 540, 340, 0, 0, 0, 0, 0}}},
+
+        {"HL2_EXPLOSION", "The largest thing that happens to you. Scaled by distance.",
+         // One of the very few whole-player events that earns a haptic in both
+         // hands: a blast genuinely arrives through the air and the floor, not
+         // through anything you are holding.
+         // Levels pulled down from 0.95/1.00/0.55, which drove the limiter to
+         // 0.69. Being the biggest thing in the game does not mean riding the
+         // ceiling: what a limiter takes first is the sharp transient, so a
+         // blast asked to be loudest was paying for it by losing the crack that
+         // makes it a blast. The hierarchy is kept by DURATION and by being the
+         // only bilateral event with a texture bed under it.
+         {{"transient", 280, 0.72f, 26, 16, 0, 0, 0, 0, 0, 0},
+          {"body", 150, 45, 0.86f, 320, 210, 0, 0, 0, 0, 0},
+          {"texture", 240, 0.8f, 0.42f, 240, 170, 0, 0, 0, 0, 0}}},
     };
     return table;
 }

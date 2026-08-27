@@ -33,7 +33,7 @@
 
 #pragma once
 
-#include "haptics.h"
+#include "core/haptics.h"
 
 #include <map>
 #include <string>

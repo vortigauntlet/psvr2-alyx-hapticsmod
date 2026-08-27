@@ -1,29 +1,60 @@
-# PSVR2 Alyx Haptics
+# PSVR2 Haptics
 
-Bespoke haptics and adaptive triggers for **Half-Life: Alyx** on **PSVR2 Sense
-controllers**, via the PSVR2Toolkit CAPI.
+Bespoke haptics and adaptive triggers on **PSVR2 Sense controllers**, via the
+PSVR2Toolkit CAPI.
 
-No DLL injection. No pattern scanning. No patched Valve binaries.
-Headset rumble is supported but **off by default** - see below.
+* **Half-Life: Alyx** - complete, and the integration everything else was
+  learned from.
+* **Half-Life 2 VR** - the middleware half is complete and measurable today.
+  The game already ships with bHaptics support built in, so it broadcasts its
+  own haptic events to a local port and this can listen to them with nothing
+  installed; an optional server plugin adds mass, material and spin but has
+  **not yet been compiled or run**. See [docs/HL2VR.md](docs/HL2VR.md), which is
+  explicit about what is verified and what is not.
 
-It does add one line to one Valve **text** file — see
+No DLL injection. No pattern scanning. No patched game binaries. No hardcoded
+offsets. Headset rumble is supported but **off by default** - see below.
+
+The Alyx install does add one line to one Valve **text** file - see
 [How the game side loads](#how-the-game-side-loads). That is reversible and
-`Uninstall.bat` removes it.
+`Uninstall.bat` removes it. The Half-Life 2 VR install touches no existing file
+at all.
 
 ```
-Half-Life: Alyx
-      |   VScript addon  (game/hlvr_addons/psvr2_haptics)
-      v
-  console.log
-      |
-      v
-psvr2_alyx_haptics.exe
-      |-- semantic event router -> Alyx-specific tactile profiles
-      |-- adaptive trigger state machine (persistent base + transient overlays)
-      '-- PCM voice synthesis and mixer (3 kHz, 32-sample chunks)
-      v
-PSVR2Toolkit CAPI  ->  PSVR2 Sense controllers
+        Half-Life: Alyx                      Half-Life 2 VR
+             |                                     |
+      VScript addon                     built-in bHaptics support
+      (embedded in the exe)             + optional server plugin
+             |                                     |
+    netcon 29000 / console.log           ws 15881 / udp 29001
+             |                                     |
+      +------+------+                      +-------+------+
+      | games/alyx  |                      | games/hl2vr  |
+      +------+------+                      +-------+------+
+             |                                     |
+             +------------------+------------------+
+                                |
+                          IGameAdapter
+                                |
+     +--------------------------+---------------------------+
+     |                        core/                          |
+     |  events  materials  impact  variation  profiles       |
+     |  haptics (voices, mixer, limiter)                     |
+     |  triggers (persistent base + transient overlays)      |
+     |  transport   config   hmd                             |
+     +--------------------------+---------------------------+
+                                |
+                    PSVR2Toolkit CAPI (3 kHz, 32-sample chunks)
+                                |
+                      PSVR2 Sense controllers
 ```
+
+Nothing in `core/` knows which game is running, and `main.cpp` names a game in
+exactly one function. Adding a third game means writing an adapter, not touching
+the synthesis, the mixer, the trigger scheduler, recording, replay or analysis.
+
+Pick a game with `--game alyx` (the default) or `--game hl2vr`, or with `game=`
+in the config file.
 
 ## Install
 
@@ -116,6 +147,15 @@ is now fixed by choking each shot with the next.
 
 ## Command line
 
+Two switches were added when the second game arrived:
+
+| Switch | What it does |
+|---|---|
+| `--game alyx\|hl2vr` | which integration to run; overrides `game=` in the config |
+| `--verify` | offline self-checks - the event model, the text codec, the material set, and that every self-test case renders or is asserted silent. Needs no hardware and no game, and exits non-zero on failure. |
+| `--bhaptics-scan` | listen for a game's own bHaptics event stream and print every pattern it announces and fires. Needs no hardware and nothing installed - only the game running. This is how the Half-Life 2 VR key names get discovered. |
+
+
 | Option | Effect |
 |---|---|
 | *(none)* | install/update the addon, then run |
@@ -129,6 +169,7 @@ is now fixed by choking each shot with the next.
 | `--replay <f>` | play a session back (add `--analyze` for offline) |
 | `--probe` | measure the PCM path and report driver behaviour |
 | `--analyze` | render every signature offline and print peak/duration/pitch — no hardware needed |
+| `--impacts <f>` | read a recording and report where the held-impact thresholds should sit — no hardware needed |
 | `--sweep` | frequency response check — which frequencies you actually feel |
 | `--hands` | left/right localisation check |
 | `--install` / `--uninstall` | manage the game addon only |
@@ -483,8 +524,36 @@ softer rather than being either suppressed or asserted at full strength.
 Material class is likewise inferred from model/classname, because Alyx does not
 expose surface properties to VScript.
 
-The thresholds are unvalidated guesses and expect tuning. `debug=true` prints
-every impact with its impulse, mass, spin and confidence for that purpose.
+### Tuning the thresholds, rather than guessing them
+
+The two numbers that decide whether a deceleration counts as a collision —
+`HELD_MIN_SPEED` and `HELD_MIN_EXCESS` — were placeholders for a long time, and
+the honest problem was that they could not be checked. The script only reported
+impacts that **passed**, so a threshold set too high produced nothing at all
+and left nothing in the log to explain the silence. That reveals false alarms
+but never misses, which is backwards: "I bashed it and felt nothing" is the
+more likely complaint.
+
+The script now also reports every **near-miss** as `PHYS_CANDIDATE`, from floors
+set well below the real thresholds, so a recording contains the decision
+boundary rather than only the far side of it. These are diagnostic only and
+never produce a haptic.
+
+```bash
+psvr2_alyx_haptics.exe --launch --record session.log   # play, and bash things
+psvr2_alyx_haptics.exe --impacts session.log           # then read it back
+```
+
+`--impacts` reports the distribution of speed, excess and impulse, how many
+events each candidate threshold would accept, and how much of each
+deceleration the hand's own movement explains. What you are looking for is a
+**plateau** — a range of thresholds where the count barely moves means real
+hits and ordinary arm movement are cleanly separated, and anywhere in that
+range is safe.
+
+If there is no plateau, the two populations overlap and no threshold separates
+them. That is a real finding rather than a failed measurement: it would mean
+the discriminator itself needs work, not its numbers.
 
 ## Extra: the Options button and the Alyx menu
 

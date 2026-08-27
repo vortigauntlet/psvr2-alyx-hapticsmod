@@ -466,9 +466,30 @@ reported as one — every impact carries a confidence value, and low confidence
 plays softer rather than being suppressed or asserted.
 
 **The thresholds (`HELD_MIN_SPEED = 110`, `HELD_MIN_EXCESS = 95`, in Source
-units/s) are unvalidated guesses.** They have never been compared against real
-in-game numbers. Expect to tune them; `debug=true` prints every impact with its
-impulse, mass, spin and confidence for exactly that purpose.
+units/s) are still unvalidated** — but they are now *measurable*, which they
+were not before.
+
+The obstacle was never effort, it was instrumentation. The script reported only
+impacts that **passed**, so a threshold set too high produced silence and left
+nothing in the log to explain it. Logging just the accepted hits can reveal
+false alarms but never misses, and a miss is the more likely failure.
+
+Game script 7.1 adds `PHYS_CANDIDATE`: every near-miss, from floors well below
+the real thresholds, so a recording brackets the decision boundary instead of
+only recording its far side. `--impacts` reads that back and reports the
+distribution, what each candidate threshold would accept, and how much of each
+deceleration the hand's own movement explains.
+
+| Claim | Level |
+|---|---|
+| Candidates are logged and never produce a haptic | **STATIC** — the router returns before any handler; verified by reading the path |
+| `--impacts` parses a recording and reports correctly | **RUNTIME** — exercised against a synthetic recording with a known answer; it found the planted plateau |
+| The thresholds are correct | **NOT ESTABLISHED** — needs one session of deliberately bashing things |
+
+What to look for is a **plateau**: a range where the accept count barely moves
+means real hits and arm movement are cleanly separated. No plateau would mean
+they overlap and no threshold can separate them — which is a finding about the
+discriminator, not about the numbers.
 
 ---
 
@@ -674,3 +695,153 @@ all. They are RUNTIME: measured, distinct, and not clipping.
 - No exact physical impulse. `mass × Δvelocity` is a defensible heuristic and is
   labelled as one everywhere it appears.
 - No native memory reads, no injection, no patched Valve binaries.
+
+---
+
+## Half-Life 2 VR integration (2026-08-27)
+
+Graded on the same five levels as everything else. The short version: the
+middleware half reaches **STATIC**, and the game side reaches **CODE** and no
+further, because it has never been compiled.
+
+### Reusable core - **STATIC**
+
+The Alyx router was split into a game-agnostic core and a game adapter. The
+proof that this changed nothing is a measurement rather than an assertion:
+`--analyze` output before and after the refactor is **byte-identical** across
+all 52 Alyx signatures, the collision report and the recoil ladder. The only
+difference in the whole file is one added banner line naming the game.
+
+Moved into `core/` unchanged: the material recipes, the impact synthesis, the
+per-instance variation. Added: a game-independent event model (`core/events.h`),
+an adapter interface (`core/adapter.h`), and a UDP transport.
+
+### What the Half-Life 2 game side can observe - **STATIC**
+
+Every `CreateEvent()` reachable from singleplayer in Source SDK 2013 was read.
+The complete useful set is `player_hurt` (**no damage amount**), `entity_killed`,
+`break_breakable` (**carries a material**), `break_prop`, `physgun_pickup`,
+`weapon_equipped`, `ammo_pickup`, `take_health`, `take_armor`.
+
+There is no `weapon_fire`, no reload event, no melee event, no explosion event.
+`door_moving` exists but is `#ifdef CSTRIKE_DLL` and never fires in Half-Life 2 -
+worth stating because assuming otherwise would have produced a door haptic that
+silently never happened.
+
+Everything else the plugin reports is **inferred** from polled state, and each
+inference is documented at its site with what it watches and how it could be
+wrong.
+
+### The HL2VR source is not public - **STATIC**
+
+Checked, because the whole integration strategy depends on it. The Source VR Mod
+Team's FAQ says the mod can in principle be open sourced but has not been. The
+only public HL2VR repository, `vittorioromeo/HL2VRU`, contains exactly two files
+in its git tree - `.gitignore` and `README.md` - confirmed through the GitHub
+API rather than by looking at the rendered page.
+
+Consequence: direct source modification is not available, and a server plugin is
+the cleanest remaining integration point rather than a fallback.
+
+### Half-Life 2 tactile design - **STATIC**
+
+62 signatures render and measure. The collision report finds **no pair** a hand
+could not tell apart, across seven firing weapons, eight reload mechanisms, the
+gravity gun family, melee, ten materials and the world set. Every weapon is
+separable on the trigger ladder as well.
+
+Two assertions are enforced by `--verify` rather than trusted:
+
+* `melee-swing` renders **silent**. A crowbar swung through empty air must not
+  vibrate, and this is the check that keeps it that way.
+* `grav-hold-still` renders **silent**. Standing still holding a crate produces
+  trigger load and no waveform at all.
+
+Reaching zero collisions took three passes and the first one was wrong in an
+instructive way: the eight reload mechanisms had each been built as the
+mechanism it physically is, which made them different *code* and left them the
+same *effect* - all eight inside 320-360 ms and 125-210 Hz, twelve flagged
+pairs. Structure makes them feel like different mechanisms; spacing on the two
+coarse axes is what makes them register as different events at all.
+
+Two measurement bugs were found by the same report and are worth recording,
+because both would have been invisible by feel:
+
+* The mega-cannon reset in the test harness emitted its own 620 ms swell into
+  the *next* case's measurement. `carry-grab` was measuring 670 ms of somebody
+  else's waveform.
+* Every gravity-gun release case primed itself with a grab, so each release was
+  measuring the capture before it.
+
+### Half-Life 2 game side - **CODE**
+
+`src/games/hl2vr/plugin/` is written against the published Source SDK 2013
+headers, with every interface, event and field cited against the file it was
+read from. It has **not been compiled**, there is no SDK checkout or game
+install on this machine, and the CMakeLists is a starting point rather than a
+recipe that has been run.
+
+Nothing about it should be described as working. The ordered list of what to
+check first is in `docs/HL2VR.md` under "Runtime validation required"; the
+largest single risk is whether HL2VR's VR grab still routes through
+`Pickup_OnPhysGunPickup`, because the entire gravity-gun family depends on it.
+
+### Explicitly not implemented, and why
+
+* **Gravity gun charge-up.** Half-Life 2's gravity gun has no charge state.
+  The brief listed one as an example; inventing it would be fabricated physics.
+* **Which hand.** Half-Life 2 VR is a two-handed VR mod, but nothing in any
+  network table a plugin can read says which hand holds the weapon. Everything
+  goes to the configured primary hand. The `hand=` field is already in the wire
+  format and the adapter already honours it, so this is one plugin line away if
+  HL2VR ever exposes the state.
+* **AR2 charged shot events.** The two-stage alternate fire is real and the
+  adapter renders it, but the plugin does not yet emit the events - the timing
+  signal has not been verified against a running game.
+
+### The bHaptics transport - **STATIC**
+
+Found by following up on "bHaptics made a mod for HL2VR", which was wrong in the
+detail and right in the direction. There is no third-party mod: bHaptics' own
+setup guide for the game is "install Half-Life 2, install the VR mod, press
+play", because the Source VR Mod Team built the support in themselves.
+
+Both bHaptics SDKs - the C# one, and the native C++ `haptic-library` whose
+third-party dependency list names `easywsclient` - are WebSocket CLIENTS to
+`ws://127.0.0.1:15881/v2/feedbacks`, sending
+`{"Register":[{"Key":..}],"Submit":[{"type":"key","key":..}]}`. Register
+announces the game's entire haptic vocabulary on connect.
+
+So a game with built-in bHaptics support already broadcasts its own semantic
+events to a local port. On a machine with no bHaptics software that port is
+free. Implemented as `core/bhaptics_listener`, and it removes the need to build
+anything at all.
+
+Verified offline: the WebSocket handshake against RFC 6455's published test
+vector, and the whole path - listener, JSON scan, key mapper, adapter,
+synthesis - against a simulated client speaking the real protocol
+(`tools/fake_hl2vr_bhaptics.py`).
+
+NOT verified, and needs the game once: that Half-Life 2 VR uses this transport,
+and its actual key names. `--bhaptics-scan` exists to answer both and asserts
+nothing in the meantime.
+
+### The key mapper refuses to guess - **STATIC**
+
+An unmapped key produces silence and one line naming it. A wrong mapping would
+fire the wrong sensation at the right moment, which is far harder to notice than
+nothing happening - and that is not hypothetical: the first draft of the rule
+table ordered "fire" before "damagefire", which turned burning damage into a
+gunshot. `--verify` now pins seven ordering traps, each of which was a real bug:
+DamageFire against PistolFire, CrowbarHit against the word "hit",
+DamageExplosion against the word "damage", and so on.
+
+### Damage by type - **STATIC**
+
+Ported from bHaptics, who split damage by source where this project splits it by
+what the arms feel. Five ways of being hurt, all in one collision family because
+you meet them in the same firefight, and all separable: shock 100 ms/389 Hz,
+bullet 208/125, explosion 343/84, fire 562/183, toxic 671/97.
+
+Fire is the one worth noting: it has NO transient. Nothing struck you, and that
+absence is most of what makes it read as burning rather than as being hit.

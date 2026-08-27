@@ -1,4 +1,4 @@
-#include "config.h"
+#include "core/config.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -91,7 +91,11 @@ std::string FindSteamRoot() {
     return {};
 }
 
-std::string FindHalfLifeAlyx() {
+namespace {
+// Every Steam library root, from libraryfolders.vdf plus the install itself.
+// Factored out when the second game arrived - both look for their own folder
+// in exactly the same set of places.
+std::vector<std::string> SteamLibraries() {
     const std::string steam = FindSteamRoot();
     std::vector<std::string> libraries;
     if (!steam.empty()) libraries.push_back(steam);
@@ -120,9 +124,35 @@ std::string FindHalfLifeAlyx() {
         }
     }
 
-    for (const auto& lib : libraries) {
+    return libraries;
+}
+} // namespace
+
+std::string FindHalfLifeAlyx() {
+    for (const auto& lib : SteamLibraries()) {
         const std::string candidate = lib + R"(\steamapps\common\Half-Life Alyx)";
         if (PathExists(candidate + R"(\game\hlvr)")) return candidate;
+    }
+    return {};
+}
+
+// Half-Life 2: VR Mod, Steam appid 658920.
+//
+// It installs as its own app rather than as a Half-Life 2 addon, and its
+// content lives in a "hl2" game directory underneath - which is what the
+// existence check below looks for, so a folder that happens to share the name
+// but is not the mod cannot be mistaken for it.
+std::string FindHalfLife2VR() {
+    static const char* kFolders[] = {
+        R"(\steamapps\common\Half-Life 2 VR)",
+        R"(\steamapps\common\Half-Life 2 VR Mod)",
+        R"(\steamapps\common\Half-Life2VR)",
+    };
+    for (const auto& lib : SteamLibraries()) {
+        for (const char* folder : kFolders) {
+            const std::string candidate = lib + folder;
+            if (PathExists(candidate + R"(\hl2\gameinfo.txt)")) return candidate;
+        }
     }
     return {};
 }
@@ -194,7 +224,9 @@ bool Config::Load(const std::string& path, std::string& error) {
             }
         };
 
-        if (key == "hla_path") hlaPath = value;
+        if (key == "game") game = value;
+        else if (key == "hla_path") hlaPath = value;
+        else if (key == "hl2vr_path") hl2vrPath = value;
         else if (key == "toolkit_dll") toolkitDll = Widen(value);
         else if (key == "master") master = num(1.0f);
         else if (key == "trigger_master") triggerMaster = num(1.0f);
@@ -227,6 +259,23 @@ bool Config::Load(const std::string& path, std::string& error) {
 }
 
 void Config::AutoDetect() {
+    if (game != "alyx" && game != "hl2vr") {
+        warnings.push_back("unknown game=" + game + "; falling back to alyx");
+        game = "alyx";
+    }
+    if (isHl2vr() &&
+        (hl2vrPath.empty() || !PathExists(hl2vrPath + R"(\hl2)"))) {
+        const std::string found = FindHalfLife2VR();
+        if (!found.empty()) {
+            if (!hl2vrPath.empty()) {
+                warnings.push_back("configured hl2vr_path did not look like a "
+                                   "Half-Life 2 VR install; using detected path instead");
+            }
+            hl2vrPath = found;
+        }
+    }
+    // Alyx detection still runs for both games: it is cheap, and it keeps the
+    // Alyx path populated so switching games mid-session needs no re-probe.
     if (hlaPath.empty() || !PathExists(hlaPath + R"(\game\hlvr)")) {
         const std::string found = FindHalfLifeAlyx();
         if (!found.empty()) {
@@ -244,6 +293,24 @@ void Config::AutoDetect() {
 }
 
 bool Config::Validate(std::string& error) const {
+    if (isHl2vr()) {
+        if (hl2vrPath.empty()) {
+            error = "Half-Life 2 VR was not found automatically.\n"
+                    "  Set hl2vr_path= in the config, e.g.\n"
+                    R"(  hl2vr_path=C:\Program Files (x86)\Steam\steamapps\common\Half-Life 2 VR)";
+            return false;
+        }
+        if (!PathExists(hl2vrPath)) {
+            error = "hl2vr_path does not exist: " + hl2vrPath;
+            return false;
+        }
+        if (!PathExists(hl2vrPath + R"(\hl2)")) {
+            error = "hl2vr_path exists but has no hl2 folder, so it is not a "
+                    "Half-Life 2 VR install: " + hl2vrPath;
+            return false;
+        }
+        return true;
+    }
     if (hlaPath.empty()) {
         error = "Half-Life: Alyx was not found automatically.\n"
                 "  Set hla_path= in the config, e.g.\n"
@@ -278,6 +345,14 @@ std::string Config::consoleLogPath() const {
 
 std::string Config::addonInstallPath() const {
     return hlaPath + R"(\game\hlvr_addons\psvr2_haptics)";
+}
+
+std::string Config::hl2vrConsoleLogPath() const {
+    return hl2vrPath + R"(\hl2\console.log)";
+}
+
+std::string Config::gamePath() const {
+    return isHl2vr() ? hl2vrPath : hlaPath;
 }
 
 } // namespace psvr2

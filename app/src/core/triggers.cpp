@@ -1,4 +1,4 @@
-#include "triggers.h"
+#include "core/triggers.h"
 
 #include <algorithm>
 #include <cmath>

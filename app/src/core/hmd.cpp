@@ -1,9 +1,9 @@
-#include "hmd.h"
+#include "core/hmd.h"
 
 #include <algorithm>
 #include <cmath>
 
-#include "capi.h"
+#include "core/capi.h"
 
 namespace psvr2 {
 

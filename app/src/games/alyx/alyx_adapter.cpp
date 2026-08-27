@@ -1,6 +1,6 @@
-#include "router.h"
+#include "games/alyx/alyx_adapter.h"
 
-#include "hmd.h"
+#include "core/hmd.h"
 
 #include <algorithm>
 #include <cmath>
@@ -38,166 +38,6 @@ std::vector<std::string> Split(const std::string& s, char sep) {
 
 float ToFloat(const std::string& s, float fallback) {
     try { return std::stof(s); } catch (...) { return fallback; }
-}
-
-// ---------------------------------------------------------------------------
-// Material signatures.
-//
-// Each material is a small layered recipe rather than a gain. The distinctions
-// that actually read on a voice coil are: how bright the initial transient is,
-// how fast it decays, and whether there is a resonant tail. Glass is bright and
-// gone; metal is bright and rings; stone is dull and heavy; rubber has no
-// transient at all. Those differences survive at low amplitude, which a pure
-// gain difference does not.
-// ---------------------------------------------------------------------------
-
-// Recipe structure, second revision.
-//
-// The first version layered a bright transient, a body, band-passed noise and a
-// resonance, all within a few hundred Hz of each other, over 30-130 ms. On this
-// hardware that reads as generic buzz: the layers sum into a broadband mush,
-// and 50 ms is far too short for skin to resolve pitch at all, so every
-// material felt the same.
-//
-// The --sweep test settled it: single sustained tones at different frequencies
-// were immediately and obviously distinguishable, while the layered effects
-// were not. So the vocabulary here is deliberately narrow and tonal:
-//
-//   onset   a brief accent so the effect has an attack. Optional, and kept
-//           quiet - it is punctuation, not the character.
-//   tone    the DOMINANT voice. Near-pure, long enough to actually perceive
-//           (120-400 ms), and each material sits at a well-separated pitch.
-//   ring    an optional second tone with a long decay. Only metal and glass.
-//   grain   a trace of noise. Mostly zero - noise is what made this feel samey.
-struct MaterialRecipe {
-    float onsetHz, onsetAmp, onsetMs;               // accent (0 amp = none)
-    float toneF0, toneF1, toneAmp, toneMs, toneDecay; // the character
-    float amDepth, amFreq;                          // tremolo (0 = steady)
-    int   pulses; float pulseGapMs;                 // repeats (1 = single hit)
-    float ringHz, ringAmp, ringMs, ringDecay;       // long tail (0 amp = none)
-};
-
-// Pitch alone cannot carry eight materials. Vibrotactile pitch discrimination
-// is coarse - roughly a 1.5x ratio is needed before two frequencies read as
-// different - so 40-500 Hz yields only about five reliable slots:
-//
-//     ~55      ~130      ~200      ~310      ~470
-//
-// (80-110 Hz is the measured dip and is used only as a sweep destination.)
-//
-// So every material is separated on at least TWO axes, and the extra axes are
-// ones skin resolves better than pitch:
-//
-//   material   pitch      length  movement   modulation      reads as
-//   glass      470        200 ms  slight     fast shimmer    tinkling
-//   plastic    470        110 ms  none       none            sharp clack
-//   metal      310        520 ms  none       slow pulse      ringing
-//   wood       200        200 ms  slight     none            solid knock
-//   cardboard  150        3 hits  none       none            crumple
-//   organic    125        340 ms  none       slow wobble     squish
-//   stone      190->50    520 ms  huge fall  none            boom
-//   rubber     115        90 ms   none       none            dead thud
-//
-// Glass and plastic deliberately share a pitch: one shimmers and lasts twice as
-// long, the other is a bare clack. That contrast is far more legible than the
-// third-of-an-octave gap they used to have.
-MaterialRecipe RecipeFor(Material m) {
-    switch (m) {
-        case Material::Glass:
-            return {/*onset*/ 470, 0.38f, 9,
-                    /*tone */ 470, 430, 0.92f, 200, 90,
-                    /*am   */ 0.55f, 42.0f,
-                    /*pulse*/ 1, 0,
-                    /*ring */ 460, 0.24f, 120, 60};
-        case Material::Plastic:
-            // Same pitch as glass, half the length, no shimmer at all.
-            return {/*onset*/ 470, 0.33f, 8,
-                    /*tone */ 470, 450, 0.64f, 110, 38,
-                    /*am   */ 0, 0,
-                    /*pulse*/ 1, 0,
-                    /*ring */ 0, 0, 0, 0};
-        case Material::Metal:
-            // Longest sustain of anything, with a slow pulse under it.
-            return {/*onset*/ 380, 0.33f, 11,
-                    // Was 1.02 with a 0.31 ring under it - over full scale
-                    // before the ring was even added, so this limited to 0.72
-                    // every time. Metal's identity is its LENGTH and its slow
-                    // pulse, both of which survive the level coming down.
-                    /*tone */ 310, 305, 0.86f, 520, 300,
-                    /*am   */ 0.40f, 7.5f,
-                    /*pulse*/ 1, 0,
-                    /*ring */ 235, 0.24f, 520, 330};
-        case Material::Wood:
-            return {/*onset*/ 230, 0.36f, 11,
-                    /*tone */ 200, 185, 0.92f, 200, 80,
-                    /*am   */ 0, 0,
-                    /*pulse*/ 1, 0,
-                    /*ring */ 0, 0, 0, 0};
-        case Material::Cardboard:
-            // Three soft hits. The rhythm is the whole signature.
-            //
-            // Moved down off wood. At 150 Hz it measured 149 Hz against wood's
-            // 192 - a 1.29x ratio, inside what skin can separate - and the
-            // rhythm that is supposed to carry it is invisible to any measure
-            // of pitch and duration. Rhythm is a real difference and it is why
-            // this pair was left alone before; but a pair that relies ENTIRELY
-            // on an axis the report cannot see has no safety net if the rhythm
-            // ever gets flattened by a later edit.
-            //
-            // Dropping it to 108 Hz cleared wood and immediately landed on
-            // organic instead - four of the eight materials had ended up
-            // inside 105-118 Hz, all fighting for one perceptual cell at the
-            // bottom of the band. The low end simply has no room left, so
-            // cardboard cannot be separated by going lower.
-            //
-            // It is separated by TIME instead, which is the axis this material
-            // already had and was not using properly. A cardboard box does not
-            // knock - it crushes progressively, and it is the only material
-            // here whose whole identity is a sequence rather than an event.
-            // Four hits spread over ~370 ms make it the longest thing in the
-            // set apart from metal and stone, and no other material is
-            // remotely close to that shape.
-            //
-            // Level comes up either way: at peak 0.22 / rms 0.032 this was the
-            // quietest thing in the entire suite, quiet enough to be a real
-            // candidate for not being felt at all.
-            return {/*onset*/ 0, 0, 0,
-                    /*tone */ 160, 148, 0.52f, 80, 40,
-                    /*am   */ 0, 0,
-                    /*pulse*/ 4, 108,
-                    /*ring */ 0, 0, 0, 0};
-        case Material::Organic:
-            // Raised off stone, which it was sitting on at 114 Hz against
-            // 105 Hz. Flesh is not masonry: it should squish higher and stop
-            // sooner, where stone booms low and rings on. The slow wobble is
-            // what makes it read as soft rather than merely low.
-            return {/*onset*/ 0, 0, 0,
-                    /*tone */ 125, 115, 0.74f, 200, 105,
-                    /*am   */ 0.50f, 4.5f,
-                    /*pulse*/ 1, 0,
-                    /*ring */ 0, 0, 0, 0};
-        case Material::Stone:
-            // The largest pitch movement in the set, and the longest fall.
-            return {/*onset*/ 200, 0.36f, 15,
-                    /*tone */ 190, 50, 0.89f, 520, 300,
-                    /*am   */ 0, 0,
-                    /*pulse*/ 1, 0,
-                    /*ring */ 0, 0, 0, 0};
-        case Material::Rubber:
-            // Shortest and lowest. No onset, no movement, no modulation.
-            return {/*onset*/ 0, 0, 0,
-                    /*tone */ 115, 112, 0.56f, 90, 26,
-                    /*am   */ 0, 0,
-                    /*pulse*/ 1, 0,
-                    /*ring */ 0, 0, 0, 0};
-        case Material::Unknown:
-        default:
-            return {/*onset*/ 280, 0.26f, 10,
-                    /*tone */ 250, 235, 0.60f, 190, 85,
-                    /*am   */ 0, 0,
-                    /*pulse*/ 1, 0,
-                    /*ring */ 0, 0, 0, 0};
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -609,90 +449,28 @@ TriggerCommand FireOverlay(const std::string& w, int& ms) {
 
 } // namespace
 
-Material ParseMaterial(const std::string& s) {
-    if (s == "glass") return Material::Glass;
-    if (s == "metal") return Material::Metal;
-    if (s == "wood") return Material::Wood;
-    if (s == "stone") return Material::Stone;
-    if (s == "rubber") return Material::Rubber;
-    if (s == "organic") return Material::Organic;
-    if (s == "cardboard") return Material::Cardboard;
-    if (s == "plastic") return Material::Plastic;
-    return Material::Unknown;
-}
 
-const char* MaterialName(Material m) {
-    switch (m) {
-        case Material::Glass: return "glass";
-        case Material::Metal: return "metal";
-        case Material::Wood: return "wood";
-        case Material::Stone: return "stone";
-        case Material::Rubber: return "rubber";
-        case Material::Organic: return "organic";
-        case Material::Cardboard: return "cardboard";
-        case Material::Plastic: return "plastic";
-        default: return "unknown";
-    }
-}
-
-float Router::Jitter(float amount) {
-    rng_ ^= rng_ << 13;
-    rng_ ^= rng_ >> 17;
-    rng_ ^= rng_ << 5;
-    const float u = static_cast<float>(rng_ & 0xFFFFFF) / 16777215.0f; // 0..1
-    return 1.0f + (u * 2.0f - 1.0f) * amount;
-}
-
-void Router::Vary(std::vector<Voice>& voices) {
-    for (auto& v : voices) {
-        const float pitch = Jitter(0.055f);
-        v.f0 *= pitch;
-        v.f1 *= pitch;
-        v.amp *= Jitter(0.08f);
-        const float stretch = Jitter(0.11f);
-        v.length = std::max(1, static_cast<int>(v.length * stretch));
-        v.decayTau *= stretch;
-        if (v.hold > 0.0f) v.hold *= stretch;
-    }
-}
-
-void Router::ResetRateLimits() {
+void AlyxAdapter::ResetForTest() {
     lastImpact_[0] = Clock::time_point{};
     lastImpact_[1] = Clock::time_point{};
-    // Re-seed the per-instance variation so every self-test case renders the
-    // SAME instance every time.
-    //
-    // Without this the measurements are not reproducible. Vary() moves length
-    // by up to +/-11% and pitch by +/-5.5%, drawn from one RNG stream that
-    // runs across the whole suite - so inserting a test case shifts the draw
-    // for every case after it, and the entire table moves. Adding the two
-    // bracing tests changed glove-pull from 463 ms to 408 ms without a single
-    // value in its profile being touched.
-    //
-    // That matters because the collision report compares ratios against a
-    // 1.5x threshold. An 11% swing on each of two effects is enough to move a
-    // pair across that line in either direction, so pairs would appear and
-    // disappear between runs for no reason connected to the design - and any
-    // effort spent chasing one of those is spent chasing noise.
-    //
-    // The variation stays in the signal path, so what is measured is still a
-    // real instance of what ships. It is just always the SAME instance.
-    rng_ = 0x2545F491u;
+    // Re-seed per-instance variation so every self-test case renders the SAME
+    // instance every time. See core/variation.h for why that is not optional.
+    vary_.Reseed();
 }
 
-Controller Router::SideFromParam(const std::string& s) const {
+Controller AlyxAdapter::SideFromParam(const std::string& s) const {
     if (s == "left") return Controller::Left;
     if (s == "right") return Controller::Right;
     return primary_;
 }
 
-void Router::Emit(Controller c, std::vector<Voice> voices, const std::string& event) {
+void AlyxAdapter::Emit(Controller c, std::vector<Voice> voices, const std::string& event) {
     // Nothing is felt from behind a pause menu.
     if (menuOpen_) return;
     const float g = std::clamp(cfg_.GainFor(event) * cfg_.GainForWeapon(weapon_), 0.0f, 3.0f);
     if (g <= 0.0f) return;
     if (g != 1.0f) for (auto& v : voices) v.amp *= g;
-    Vary(voices);
+    vary_.Apply(voices);
     // Recorded after every early return above, so the trace reflects what was
     // actually submitted rather than what was intended.
     if (c == Controller::Left || c == Controller::Both) emitTrace_ |= 1;
@@ -700,14 +478,14 @@ void Router::Emit(Controller c, std::vector<Voice> voices, const std::string& ev
     mixer_.Submit(c, std::move(voices));
 }
 
-void Router::SetWeapon(const std::string& w) {
+void AlyxAdapter::SetWeapon(const std::string& w) {
     if (w == weapon_) return;
     weapon_ = w;
     RefreshWeaponState();
     if (cfg_.debug) std::cout << "[Weapon] " << weapon_ << "\n";
 }
 
-void Router::RefreshWeaponState() {
+void AlyxAdapter::RefreshWeaponState() {
     // Any weapon change drops the eased shotgun profile.
     shotgunRapid_ = false;
     triggers_.SetBase(primary_, WeaponBase(weapon_), weapon_);
@@ -721,7 +499,7 @@ void Router::RefreshWeaponState() {
     }
 }
 
-void Router::Fire(const std::string& w, bool twoHand, int roundsLeft) {
+void AlyxAdapter::Fire(const std::string& w, bool twoHand, int roundsLeft) {
     // Recoil in two stages: a SHOVE, then a settle.
     //
     // Vibration mode drives the trigger's own motor, so it genuinely moves
@@ -873,86 +651,35 @@ void Router::Fire(const std::string& w, bool twoHand, int roundsLeft) {
     }
 }
 
-void Router::Impact(Material m, float energy, Controller side, float mass, float spin,
+void AlyxAdapter::Impact(Material m, float energy, Controller side, float mass, float spin,
                     float confidence) {
-    const MaterialRecipe r = RecipeFor(m);
-    // A held-object impact is inferred from a velocity differential, not read
-    // from a collision callback, so the game side reports how sure it is.
-    // Rather than picking a threshold and pretending everything above it is
-    // certain, confidence scales the level: a marginal reading lands as a
-    // light knock, a confident one lands at full weight. The floor is high
-    // enough that a real-but-doubtful hit is still clearly felt.
-    const float trust = 0.55f + 0.45f * std::clamp(confidence, 0.0f, 1.0f);
-    const float e = std::clamp(energy, 0.05f, 1.0f) * trust;
-    // Energy stretches the effect, but the floor is high: below roughly 100 ms
-    // skin cannot resolve pitch and every material collapses back into "a tap".
-    const float lenScale = 0.80f + 0.45f * e;
-    // Angular velocity (deg/s) at the moment of contact. A tumbling object
-    // does not just hit, it scrapes and rolls, so spin lengthens and roughens
-    // the texture layer rather than changing the transient.
-    const float tumble = std::clamp(spin / 600.0f, 0.0f, 1.0f);
-
-    std::vector<Voice> v;
-    const int pulses = std::max(1, r.pulses);
-
-    for (int p = 0; p < pulses; ++p) {
-        const int delaySamples =
-            static_cast<int>(kSampleRate * (r.pulseGapMs * p) / 1000.0f);
-        // Repeats decay so a burst reads as one gesture, not three events.
-        const float pulseAmp = e * std::pow(0.72f, static_cast<float>(p));
-
-        // Onset: punctuation only. Deliberately quiet - when this dominated,
-        // every material just felt like "a tap".
-        if (r.onsetAmp > 0.0f) {
-            auto onset = Transient(r.onsetHz, r.onsetAmp * pulseAmp,
-                                   r.onsetMs, r.onsetMs * 0.6f);
-            onset.delay = delaySamples;
-            v.push_back(onset);
-        }
-
-        // The character. Long enough for skin to resolve the pitch, and
-        // modulated where the material calls for it.
-        auto tone = Body(r.toneF0, r.toneF1, r.toneAmp * pulseAmp,
-                         r.toneMs * lenScale, r.toneDecay * lenScale);
-        tone.delay = delaySamples;
-        tone.amDepth = r.amDepth;
-        tone.amFreq = r.amFreq;
-        // Spin roughens the tone directly rather than adding a noise layer.
-        if (tumble > 0.2f) {
-            tone.fmDepth = 25.0f * tumble;
-            tone.fmFreq = 7.0f + 11.0f * tumble;
-        }
-        v.push_back(tone);
-    }
-
-    // Long resonance - only metal and glass have one, and it is a large part of
-    // what tells them apart from everything else.
-    if (r.ringAmp > 0.0f) {
-        auto ring = Body(r.ringHz, r.ringHz * 0.97f, r.ringAmp * e,
-                         r.ringMs * lenScale, r.ringDecay * lenScale);
-        ring.delay = kSampleRate * 6 / 1000;
-        ring.amDepth = r.amDepth * 0.6f;
-        ring.amFreq = r.amFreq;
-        v.push_back(ring);
-    }
+    // The synthesis itself lives in core/impact.cpp so Half-Life 2 gets the
+    // same physics rather than a second, worse version of it. What stays here
+    // is Alyx's policy: which hand, and the trigger jolt.
+    const ImpactSpec spec{m, energy, mass, spin, confidence};
 
     // A genuinely heavy object also loads the opposite hand through the body.
-    // (`far` is a legacy MSVC keyword macro, hence the name.)
-    if (mass > 5.0f && e > 0.55f) {
+    //
+    // Emitted BEFORE the impact itself, and that order is load-bearing:
+    // variation draws from one RNG stream in submission order, so swapping
+    // these two would change every measurement in the suite from here on.
+    std::vector<Voice> sympathetic = BuildSympatheticImpact(spec);
+    if (!sympathetic.empty()) {
         const Controller opposite =
             (side == Controller::Left) ? Controller::Right : Controller::Left;
-        std::vector<Voice> sympathetic;
-        sympathetic.push_back(Body(70, 55, 0.22f * e, 150, 95));
         Emit(opposite, std::move(sympathetic), "PHYS_IMPACT");
     }
-    Emit(side, std::move(v), "PHYS_IMPACT");
+    Emit(side, BuildImpact(spec), "PHYS_IMPACT");
 
     // A brief trigger wall sells the shock through the finger.
-    const int strength = std::clamp(static_cast<int>(std::lround(2 + e * 6)), 1, 8);
-    triggers_.PushOverlay(side, trig::Feedback(e > 0.7f ? 1 : 3, strength), 55, 4, "impact");
+    const float trust = 0.55f + 0.45f * std::clamp(confidence, 0.0f, 1.0f);
+    const float e = std::clamp(energy, 0.05f, 1.0f) * trust;
+    triggers_.PushOverlay(side, trig::Feedback(ImpactTriggerPosition(e),
+                                               ImpactTriggerStrength(e)),
+                          55, 4, "impact");
 }
 
-void Router::Handle(const std::string& event, const std::string& param) {
+void AlyxAdapter::Handle(const std::string& event, const std::string& param) {
     const auto parts = Split(param, ',');
     auto arg = [&](size_t i) -> std::string {
         return i < parts.size() ? parts[i] : std::string{};
@@ -1411,6 +1138,16 @@ void Router::Handle(const std::string& event, const std::string& param) {
             static_cast<int>(std::lround(2 + e * 5)), 1, 8), 120), 45, 4, "throw");
         return;
     }
+    // Threshold-tuning diagnostic. Deliberately produces NOTHING: it exists
+    // only so a recording captures the near-misses as well as the hits, which
+    // is what makes the two thresholds measurable instead of guessed. Analyse
+    // a recording with --impacts.
+    //
+    // Returning early here is load-bearing. If this ever fell through to a
+    // handler it would fire a haptic for every deceleration of a held object,
+    // which is precisely the released-object buzzing this project removed.
+    if (event == "PHYS_CANDIDATE") return;
+
     if (event == "PHYS_IMPACT") {
         const float impulse = ToFloat(arg(0), 0.0f);
         if (impulse < cfg_.minImpactImpulse) return;
@@ -1925,7 +1662,7 @@ void Router::Handle(const std::string& event, const std::string& param) {
 // Self test
 // ---------------------------------------------------------------------------
 
-std::vector<RecoilSpec> RecoilLadder() {
+std::vector<RecoilSpec> AlyxAdapter::RecoilLadder() const {
     std::vector<RecoilSpec> out;
     for (const char* w : {"PISTOL", "SMG", "SHOTGUN"}) {
         int breakMs = 0, kickMs = 0;
@@ -1967,7 +1704,7 @@ std::vector<RecoilSpec> RecoilLadder() {
     return out;
 }
 
-std::vector<std::string> SelfTestNames() {
+std::vector<std::string> AlyxAdapter::SelfTestNames() const {
     return {
         // Weapons
         "pistol", "shotgun", "smg", "grenade", "shotgun-empty",
@@ -2009,7 +1746,8 @@ std::vector<std::string> SelfTestNames() {
     };
 }
 
-bool RunSelfTest(Router& r, const std::string& name, const std::string& side) {
+bool AlyxAdapter::RunSelfTest(const std::string& name, const std::string& side) {
+    AlyxAdapter& r = *this;
     // Every test takes the hand it should play on, so the suite alternates and
     // localisation is actually exercised. Previously almost every case was
     // hard-coded to the right hand, which made the whole thing feel one-sided.
@@ -2017,7 +1755,7 @@ bool RunSelfTest(Router& r, const std::string& name, const std::string& side) {
     r.Handle("PRIMARY_HAND", s);
     // Signatures fire back to back here; the real-time impact limiter must not
     // silently eat the ones after the first.
-    r.ResetRateLimits();
+    r.ResetForTest();
     r.ResetEmitTrace();
     // Start every case from empty hands.
     //
@@ -2114,6 +1852,70 @@ bool RunSelfTest(Router& r, const std::string& name, const std::string& side) {
     if (name == "store")           { r.Handle("BACKPACK_STORE", s); return true; }
     if (name == "retrieve")        { r.Handle("BACKPACK_RETRIEVE", s); return true; }
     return false;
+}
+
+// Which perceptual family a self-test case belongs to.
+//
+// Moved here from main.cpp when the second game arrived: the grouping is a
+// statement about Half-Life: Alyx's moment-to-moment play, so it belongs with
+// the rest of the Alyx knowledge rather than in a shared reporting routine that
+// would otherwise have to grow a switch per game.
+//
+// Grouped by CO-OCCURRENCE, because what matters is telling apart things you
+// meet in the same moment. Confusing the pistol with the shotgun is a real
+// failure; confusing the pistol with a wooden crate impact is not.
+const char* AlyxAdapter::AnalyzeFamily(const std::string& n) const {
+    if (n == "pistol" || n == "shotgun" || n == "smg" || n == "grenade") return "weapons";
+    if (n.rfind("glove", 0) == 0 || n.rfind("catch", 0) == 0) return "gravity glove";
+    // Reload mechanisms are grouped BY WEAPON, not into one pile.
+    //
+    // You rack a pistol slide seconds after seating its magazine, so those two
+    // must not feel alike - but a pistol slide and a shotgun shell are never
+    // performed in the same gesture, and forcing them apart would spend real
+    // design room solving a problem the hand does not have.
+    //
+    // Lumping them was making the report worse, not better: it flagged
+    // cross-weapon pairs as failures while the pairs that genuinely collide sat
+    // in the same list looking no more urgent.
+    if (n == "reload" || n == "chamber") return "pistol reload";
+    if (n == "shell-insert" || n == "shotgun-pump") return "shotgun reload";
+    // Five steps performed one after another - the tightest co-occurrence in
+    // the game. They were six copies of one waveform until this family existed
+    // to say so.
+    if (n.rfind("smg-", 0) == 0) return "smg reload";
+    // Bringing the support hand on and taking it off again.
+    if (n == "brace" || n == "unbrace") return "bracing";
+    // Storing and retrieving are the same gesture in opposite directions and
+    // you do both constantly, so they are the pair most worth separating in the
+    // whole handling set.
+    if (n == "store" || n == "retrieve" || n == "pickup") return "handling";
+    // Climbing: a ledge and a rung, met in the same traversal.
+    if (n == "mantle" || n == "ladder") return "climbing";
+    // Grabbed, then cut loose.
+    if (n.rfind("barnacle", 0) == 0) return "barnacle";
+    if (n.rfind("tripmine-", 0) == 0) return "hacking";
+    // Both are healing, and the game offers both in the same rooms.
+    if (n == "health-station" || n == "health-pen") return "healing";
+    // cover-mouth, levitate and combine-tank are deliberately UNGROUPED. Each
+    // is a one-off set-piece that never occurs alongside the others, so a ratio
+    // between them measures nothing a hand will ever compare. They are long
+    // sustained states and would collide with each other on duration by
+    // construction - a permanent false alarm, and a report that cries wolf
+    // stops being read.
+    //
+    // impact-light and impact-heavy are ENERGY probes, not material ones - they
+    // deliberately reuse a material to show what energy scaling does, so
+    // matching that material is the correct result, not a collision.
+    if (n == "impact-light" || n == "impact-heavy") return nullptr;
+    if (n.rfind("impact-", 0) == 0) return "materials";
+    return nullptr;
+}
+
+std::vector<std::string> AlyxAdapter::ConnectionHelp() const {
+    return {
+        "network console : 127.0.0.1:29000  (add -netconport 29000)",
+        "or console.log  : -condebug",
+    };
 }
 
 } // namespace psvr2

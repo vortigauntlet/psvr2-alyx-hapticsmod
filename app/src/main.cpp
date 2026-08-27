@@ -23,22 +23,31 @@
 #include <cmath>
 #include <csignal>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <cstdio>
 #include <map>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
 
-#include "capi.h"
-#include "config.h"
-#include "haptics.h"
-#include "hmd.h"
-#include "install.h"
-#include "profiles.h"
-#include "router.h"
-#include "transport.h"
-#include "triggers.h"
+#include "core/adapter.h"
+#include "core/capi.h"
+#include "core/bhaptics_listener.h"
+#include "core/config.h"
+#include "core/events.h"
+#include "core/haptics.h"
+#include "core/hmd.h"
+#include "core/profiles.h"
+#include "core/transport.h"
+#include "core/triggers.h"
+#include "games/alyx/alyx_adapter.h"
+#include "games/alyx/alyx_install.h"
+#include "games/alyx/netconsole.h"
+#include "games/hl2vr/hl2vr_adapter.h"
+#include "games/hl2vr/hl2vr_bhaptics.h"
+#include "games/hl2vr/hl2vr_install.h"
 
 namespace psvr2 {
 namespace {
@@ -216,7 +225,7 @@ bool LoadRecording(const std::string& path, std::vector<Entry>& entries) {
 // synthetic test can: OVERLAP. The self-test fires each signature alone, but a
 // recording has you reloading while carrying a crate and taking a hit in the
 // middle of a burst, which is exactly when the limiter starts crushing things.
-int RunReplayAnalysis(Router& router, Mixer& mixer, const std::string& path) {
+int RunReplayAnalysis(IGameAdapter& router, Mixer& mixer, const std::string& path) {
     std::vector<Entry> entries;
     if (!LoadRecording(path, entries)) return 2;
 
@@ -293,7 +302,7 @@ int RunReplayAnalysis(Router& router, Mixer& mixer, const std::string& path) {
     return 0;
 }
 
-int RunReplay(Router& router, TriggerManager& triggers, Mixer& mixer,
+int RunReplay(IGameAdapter& router, TriggerManager& triggers, Mixer& mixer,
               const std::string& path, bool debug) {
     std::vector<Entry> entries;
     if (!LoadRecording(path, entries)) return 2;
@@ -368,14 +377,18 @@ void PrintVersion() {
 
 void PrintUsage() {
     std::cout <<
-        "PSVR2 Alyx Haptics\n"
+        "PSVR2 Haptics  -  Half-Life: Alyx and Half-Life 2 VR\n"
         "\n"
         "  psvr2_alyx_haptics.exe [options] [config-file]\n"
         "\n"
-        "  (no options)     install/update the addon, then run\n"
-        "  --launch         also start Half-Life: Alyx through Steam\n"
-        "  --install        install/update the game addon and exit\n"
-        "  --uninstall      remove the game addon and exit\n"
+        "  --game <name>    alyx (default) or hl2vr. Overrides game= in the\n"
+        "                   config file, so one install can drive either game\n"
+        "                   from two shortcuts.\n"
+        "\n"
+        "  (no options)     install/update the game side, then run\n"
+        "  --launch         also start the game through Steam\n"
+        "  --install        install/update the game side and exit\n"
+        "  --uninstall      remove the game side and exit\n"
         "  --test [name]    play tactile signatures without the game\n"
         "                   (no name = play them all in order)\n"
         "  --list-tests     print the available test names\n"
@@ -404,12 +417,20 @@ void PrintUsage() {
         "\n"
         "  diagnostics:\n"
         "  --probe          measure the PCM path and report driver behaviour\n"
+        "  --bhaptics-scan  listen for a game's own bHaptics event stream and\n"
+        "                   print every pattern it announces and fires. This is\n"
+        "                   how the Half-Life 2 VR key names get discovered.\n"
+        "  --verify         run the offline self-checks: the event model, the\n"
+        "                   codec, the materials, and that every self-test\n"
+        "                   case renders (or is asserted silent)\n"
         "  --analyze        render every signature offline and print what it\n"
         "                   actually produces - no headset or hardware needed\n"
         "  --sweep          frequency response check - which Hz you actually feel\n"
         "  --hmd-sweep      headset frequency response - needs hmd=true, and a\n"
         "                   jailbroken headset to be felt at all\n"
         "  --hmd-test       play the four headset patterns\n"
+        "  --impacts <f>    read a recording and report where the held-impact\n"
+        "                   thresholds should actually sit - no hardware needed\n"
         "  --hands          left/right localisation check\n"
         "\n"
         "  --debug          verbose trigger/PCM/impact diagnostics\n"
@@ -518,6 +539,160 @@ void PlayTone(Mixer& mixer, TriggerManager& triggers, Controller c,
 // some frequency, every "bright" material signature collapses into the same
 // dull thud and effects stop being distinguishable no matter how they are
 // designed. This measures it on the actual hardware instead of assuming.
+// Impact threshold analysis.
+//
+// HELD_MIN_SPEED and HELD_MIN_EXCESS in the game script decide whether a held
+// object's deceleration counts as a collision. Both have always been
+// placeholders - plausible round numbers never compared against a real swing.
+//
+// The script now reports every NEAR-MISS as PHYS_CANDIDATE, from floors well
+// below the real thresholds, so a recording contains the decision boundary
+// rather than only the far side of it. That is what makes this measurable:
+// logging just the accepted hits can reveal false alarms but never misses, and
+// "I bashed it and felt nothing" is the more likely complaint.
+//
+// This reads such a recording back and reports where the line actually sits.
+int RunImpactAnalysis(const std::string& path) {
+    std::vector<Entry> entries;
+    if (!LoadRecording(path, entries)) return 2;
+
+    struct Cand {
+        float impulse, mass, speed, objDrop, handDrop, excess;
+        bool passed;
+        std::string side, material;
+    };
+    std::vector<Cand> cands;
+
+    for (const auto& e : entries) {
+        if (e.event != "PHYS_CANDIDATE") continue;
+        // impulse,mass,side,speed,objDrop,handDrop,excess,passed,material
+        std::vector<std::string> f;
+        std::string cur;
+        for (char ch : e.param) {
+            if (ch == ',') { f.push_back(cur); cur.clear(); }
+            else cur.push_back(ch);
+        }
+        f.push_back(cur);
+        if (f.size() < 9) continue;
+        Cand c{};
+        try {
+            c.impulse  = std::stof(f[0]);
+            c.mass     = std::stof(f[1]);
+            c.side     = f[2];
+            c.speed    = std::stof(f[3]);
+            c.objDrop  = std::stof(f[4]);
+            c.handDrop = std::stof(f[5]);
+            c.excess   = std::stof(f[6]);
+            c.passed   = f[7] == "1";
+            c.material = f[8];
+        } catch (...) { continue; }
+        cands.push_back(c);
+    }
+
+    std::cout << "Impact threshold analysis\n"
+                 "-------------------------\n"
+              << "  " << path << "\n";
+
+    if (cands.empty()) {
+        std::cout << "\nNo PHYS_CANDIDATE events in this recording.\n\n"
+                     "Either it predates candidate logging (game script 7.1), or\n"
+                     "nothing was carried and swung during the session.\n\n"
+                     "To collect data: hold a bottle, a can, a crate, and bash them\n"
+                     "into walls, floors and enemies. Wave them about WITHOUT hitting\n"
+                     "anything too - the non-hits are half the measurement.\n";
+        return 1;
+    }
+
+    const size_t passed = static_cast<size_t>(std::count_if(
+        cands.begin(), cands.end(), [](const Cand& c) { return c.passed; }));
+    std::cout << "  " << cands.size() << " candidates, " << passed
+              << " passed the current thresholds (speed>110, excess>95)\n\n";
+
+    auto pct = [](std::vector<float> v, double p) {
+        if (v.empty()) return 0.0f;
+        std::sort(v.begin(), v.end());
+        const size_t i = std::min(v.size() - 1,
+            static_cast<size_t>(p * static_cast<double>(v.size() - 1)));
+        return v[i];
+    };
+    std::vector<float> speeds, excesses, impulses;
+    for (const auto& c : cands) {
+        speeds.push_back(c.speed);
+        excesses.push_back(c.excess);
+        impulses.push_back(c.impulse);
+    }
+
+    std::cout << std::fixed << std::setprecision(0);
+    std::cout << "                 p10    p25    p50    p75    p90    p99    max\n";
+    auto row = [&](const char* label, std::vector<float>& v) {
+        std::cout << "  " << std::left << std::setw(13) << label << std::right;
+        for (double p : {0.10, 0.25, 0.50, 0.75, 0.90, 0.99, 1.00})
+            std::cout << std::setw(7) << pct(v, p);
+        std::cout << "\n";
+    };
+    row("speed", speeds);
+    row("excess", excesses);
+    row("impulse", impulses);
+
+    // How the accept count moves with the threshold. The useful shape is a
+    // PLATEAU: if the count barely changes across a range, real hits and
+    // ordinary arm movement are well separated and anywhere in that range is
+    // safe. A smooth fall with no flat part means they overlap and no
+    // threshold can separate them - which is itself the finding.
+    std::cout << "\nWhat other thresholds would accept:\n"
+                 "  excess >    count    (of " << cands.size() << " candidates)\n";
+    for (int t : {20, 40, 60, 80, 95, 120, 150, 200, 300}) {
+        const size_t n = static_cast<size_t>(std::count_if(cands.begin(), cands.end(),
+            [&](const Cand& c) { return c.excess > static_cast<float>(t); }));
+        std::cout << "  " << std::setw(8) << t << std::setw(9) << n;
+        if (t == 95) std::cout << "   <- current";
+        std::cout << "\n";
+    }
+
+    // The discriminator itself. In a real collision the object sheds speed the
+    // hand did not, so excess/objDrop near 1.0 means "the hand cannot explain
+    // this". Near 0 means the hand simply stopped and nothing was struck.
+    int strong = 0, weak = 0;
+    for (const auto& c : cands) {
+        if (c.objDrop <= 0.0f) continue;
+        ((c.excess / c.objDrop) > 0.6f ? strong : weak)++;
+    }
+    std::cout << "\nHow much the HAND explains:\n"
+              << "  " << strong << " unexplained by hand movement (likely real contact)\n"
+              << "  " << weak << " mostly explained by the hand slowing (likely not)\n";
+
+    std::cout << "\nHeaviest ten:\n"
+                 "     impulse   mass   speed  excess  hand-expl  material\n";
+    std::vector<Cand> top = cands;
+    std::sort(top.begin(), top.end(),
+              [](const Cand& a, const Cand& b) { return a.impulse > b.impulse; });
+    for (size_t i = 0; i < std::min<size_t>(10, top.size()); ++i) {
+        const Cand& c = top[i];
+        const float expl = c.objDrop > 0.0f ? (1.0f - c.excess / c.objDrop) : 0.0f;
+        std::cout << "  " << std::setw(10) << c.impulse
+                  << std::setw(7) << c.mass
+                  << std::setw(8) << c.speed
+                  << std::setw(8) << c.excess
+                  << std::setw(10) << std::setprecision(2) << expl << std::setprecision(0)
+                  << "  " << c.material
+                  << (c.passed ? "" : "   (MISSED)") << "\n";
+    }
+
+    std::cout << "\nReading this:\n"
+                 "  * Look for a PLATEAU in the threshold table. A range where the\n"
+                 "    count barely moves means real hits and ordinary arm movement\n"
+                 "    are cleanly separated, and anywhere in it is a safe value.\n"
+                 "  * No plateau means they overlap and no threshold separates\n"
+                 "    them. That is a real finding, not a failed measurement - it\n"
+                 "    would mean the discriminator needs work, not the numbers.\n"
+                 "  * Anything marked (MISSED) is a hit you may have felt nothing\n"
+                 "    for. If the heaviest rows are missed, the thresholds are too\n"
+                 "    high.\n"
+                 "  * Set them in addon/scripts/vscripts/psvr2_haptics/core.lua\n"
+                 "    (HELD_MIN_SPEED, HELD_MIN_EXCESS), then rebuild.\n";
+    return 0;
+}
+
 // Headset frequency response.
 //
 // The direct counterpart of RunSweep for the grip actuator and of
@@ -672,12 +847,398 @@ int RunHands(Mixer& mixer, TriggerManager& triggers) {
 // Renders every tactile signature offline and prints what it actually produces.
 // No hardware needed. This is how the loudness hierarchy and the pitch spread
 // get verified rather than assumed.
-int RunAnalyze(Router& router, Mixer& mixer) {
+// ---------------------------------------------------------------------------
+// Self-verification.
+//
+// The layer with no test is where the rot is - this project has found the same
+// silent failure three times now, each time in the part nothing measured. These
+// are the checks that need neither hardware nor a game, so there is no excuse
+// for not running them, and they are what a change to the event model or to
+// either adapter's suite has to survive.
+//
+// Deliberately NOT a framework. Four assertions that fail loudly and return a
+// non-zero exit code is what CI needs and all it needs.
+// ---------------------------------------------------------------------------
+// Discovering a game's bHaptics event vocabulary.
+//
+// The one thing about this integration that genuinely cannot be worked out
+// without the game is the NAMES Half-Life 2 VR gives its haptic patterns. This
+// listens on the bHaptics port, prints every key the game announces and every
+// key it fires, and does nothing else - no haptics, no hardware, no install.
+//
+// One play session turns the unknown list into a known one, at which point the
+// substring rules in games/hl2vr/hl2vr_bhaptics.cpp should be replaced with
+// exact matches. That is the whole reason this tool exists rather than the
+// mapping being guessed and shipped.
+int RunBhapticsScan() {
+    std::cout <<
+        "bHaptics event scan\n"
+        "-------------------\n"
+        "Listening on 127.0.0.1:" << kBhapticsPort << " for a game with built-in\n"
+        "bHaptics support. Nothing is played and no hardware is needed.\n"
+        "\n"
+        "  1. Make sure the bHaptics Player is NOT running - it owns this port.\n"
+        "  2. Start Half-Life 2 VR and turn bHaptics ON in its options.\n"
+        "  3. Play for a few minutes: fire every weapon, reload, take damage,\n"
+        "     use the gravity gun, hit something with the crowbar.\n"
+        "  4. Ctrl+C here, and send me the list.\n\n";
+
+    BhapticsListener listener;
+    if (!listener.Connect() && !listener.listening()) {
+        if (listener.portInUse()) {
+            std::cout << "! Port " << kBhapticsPort << " is already in use.\n"
+                         "  That is almost certainly the bHaptics Player. Close it\n"
+                         "  from the system tray and run this again.\n";
+        } else {
+            std::cout << "! Could not open port " << kBhapticsPort << ".\n";
+        }
+        return 1;
+    }
+    std::cout << "Listening. Waiting for the game...\n\n";
+
+    std::map<std::string, uint64_t> fired;
+    bool sawAnything = false;
+    while (g_running) {
+        listener.Connect();
+        for (const auto& line : listener.Poll()) {
+            const auto tag = line.find("[PSVR2H]");
+            if (tag == std::string::npos) continue;
+            const std::string rest = line.substr(tag + 9);
+            const auto colon = rest.find(':');
+            if (colon == std::string::npos) continue;
+            const std::string event = rest.substr(0, colon);
+            const std::string key = rest.substr(colon + 1);
+            sawAnything = true;
+
+            if (event == "BH_APP") {
+                std::cout << "connected: " << key << "\n\n";
+            } else if (event == "BH_REGISTER") {
+                const auto m = MapBhapticsKey(key);
+                std::printf("  register  %-40s -> %-18s %s\n", key.c_str(),
+                            m.event.empty() ? "(unmapped)" : m.event.c_str(),
+                            m.rule ? m.rule : "");
+                std::fflush(stdout);
+            } else if (event == "BH_SUBMIT") {
+                if (fired[key]++ == 0) {
+                    const auto m = MapBhapticsKey(key);
+                    std::printf("  FIRED     %-40s -> %-18s %s\n", key.c_str(),
+                                m.event.empty() ? "(unmapped)" : m.event.c_str(),
+                                m.rule ? m.rule : "");
+                    std::fflush(stdout);
+                }
+            }
+        }
+        listener.WaitForData(50);
+    }
+
+    std::cout << "\n\nSummary\n-------\n";
+    if (!sawAnything) {
+        std::cout <<
+            "Nothing ever connected.\n\n"
+            "That means one of:\n"
+            "  * bHaptics is switched off in the game's options\n"
+            "  * the bHaptics Player was running and took the port first\n"
+            "  * Half-Life 2 VR does not use this transport, and the server\n"
+            "    plugin is the only route - see docs/HL2VR.md\n\n"
+            "The third is the one worth knowing, and it is the reason this tool\n"
+            "reports honestly rather than assuming.\n";
+        return 1;
+    }
+
+    std::cout << listener.registeredKeys().size() << " pattern(s) announced, "
+              << fired.size() << " actually fired.\n\n";
+    if (!fired.empty()) {
+        std::cout << "Fired, by frequency - these are the ones that matter:\n";
+        std::vector<std::pair<std::string, uint64_t>> byCount(fired.begin(), fired.end());
+        std::sort(byCount.begin(), byCount.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        for (const auto& [key, count] : byCount) {
+            const auto m = MapBhapticsKey(key);
+            std::printf("  %6llu  %-40s %s\n",
+                        static_cast<unsigned long long>(count), key.c_str(),
+                        m.event.empty() ? "<-- UNMAPPED" : m.event.c_str());
+        }
+    }
+    return 0;
+}
+
+int RunVerify(IGameAdapter& router, Mixer& mixer) {
+    int failures = 0;
+    auto fail = [&](const std::string& what) {
+        ++failures;
+        std::cout << "  FAIL  " << what << "\n";
+    };
+
+    std::cout << "Self-verification (" << router.gameName() << ")\n"
+                 "--------------------------------------------------\n";
+
+    // 1. Every event in the generic model has a name, and every name decodes
+    //    back to the event it came from. A new enumerator whose name is missing
+    //    is a compile error thanks to the static_assert in events.cpp; this
+    //    catches the subtler case of two enumerators sharing a name.
+    {
+        std::set<std::string> seen;
+        int checked = 0;
+        for (int i = 0; i < static_cast<int>(Ev::Count); ++i) {
+            const Ev e = static_cast<Ev>(i);
+            const std::string name = EvName(e);
+            if (name == "UNKNOWN" && e != Ev::Unknown) {
+                fail("event " + std::to_string(i) + " has no name");
+                continue;
+            }
+            if (!seen.insert(name).second) {
+                fail("event name '" + name + "' is used twice");
+            }
+            if (ParseEv(name) != e) {
+                fail("event '" + name + "' does not parse back to itself");
+            }
+            ++checked;
+        }
+        std::cout << "  ok    " << checked << " event names are unique and round-trip\n";
+    }
+
+    // 2. The text codec preserves every field it claims to.
+    //
+    //    This is what makes a recording from either game replayable through the
+    //    other's adapter, and what a synthetic test harness rides on, so a
+    //    silent field drop here would be invisible until a session recorded
+    //    over an hour turned out to be missing its masses.
+    {
+        HapticEvent in;
+        in.type = Ev::Impact;
+        in.hand = Hand::Left;
+        in.material = Material::Glass;
+        in.weapon = "MAGNUM";
+        in.subtype = "held";
+        in.intensity = 0.75f;
+        in.energy = 0.5f;
+        in.mass = 12.25f;
+        in.speed = 640.0f;
+        in.spin = 310.0f;
+        in.confidence = 0.8f;
+        in.count = 3;
+
+        const std::string encoded = Encode(in);
+        const auto colon = encoded.find(':');
+        HapticEvent out;
+        const bool ok = Decode(
+            colon == std::string::npos ? encoded : encoded.substr(0, colon),
+            colon == std::string::npos ? std::string{} : encoded.substr(colon + 1),
+            out);
+        if (!ok) {
+            fail("codec: '" + encoded + "' did not decode");
+        } else {
+            auto same = [&](const char* what, bool cond) {
+                if (!cond) fail(std::string("codec: ") + what + " lost in '" + encoded + "'");
+            };
+            same("type", out.type == in.type);
+            same("hand", out.hand == in.hand);
+            same("material", out.material == in.material);
+            same("weapon", out.weapon == in.weapon);
+            same("subtype", out.subtype == in.subtype);
+            same("intensity", std::fabs(out.intensity - in.intensity) < 0.01f);
+            same("energy", std::fabs(out.energy - in.energy) < 0.01f);
+            same("mass", std::fabs(out.mass - in.mass) < 0.01f);
+            same("speed", std::fabs(out.speed - in.speed) < 1.0f);
+            same("spin", std::fabs(out.spin - in.spin) < 1.0f);
+            same("confidence", std::fabs(out.confidence - in.confidence) < 0.01f);
+            same("count", out.count == in.count);
+        }
+
+        // An unknown field must be ignored rather than poisoning the event, so
+        // a newer game side can add one without breaking an older middleware.
+        HapticEvent forward;
+        if (!Decode("IMPACT", "mass=4,newfield=whatever,mat=metal", forward)) {
+            fail("codec: an unknown field made the whole event fail to decode");
+        } else if (forward.material != Material::Metal ||
+                   std::fabs(forward.mass - 4.0f) > 0.01f) {
+            fail("codec: an unknown field corrupted its neighbours");
+        }
+        std::cout << "  ok    codec round-trips every field and ignores unknown ones\n";
+    }
+
+    // 3. The WebSocket handshake matches RFC 6455's published test vector.
+    //
+    //    This is the one piece of the bHaptics transport with an authoritative
+    //    answer available offline, and it is worth pinning: a subtly wrong
+    //    handshake fails as "the game never connects", which is
+    //    indistinguishable from "the game does not use this transport". That
+    //    ambiguity would send someone down the wrong road for hours.
+    {
+        // RFC 6455 section 1.3.
+        const std::string got = WebSocketAcceptKey("dGhlIHNhbXBsZSBub25jZQ==");
+        const std::string want = "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
+        if (got != want) {
+            fail("websocket handshake: got " + got + ", RFC 6455 says " + want);
+        } else {
+            std::cout << "  ok    websocket handshake matches the RFC 6455 vector\n";
+        }
+    }
+
+    // 4. Every material class has a distinct name that parses back.
+    {
+        std::set<std::string> names;
+        for (Material m : AllMaterials()) {
+            const std::string n = MaterialName(m);
+            if (!names.insert(n).second) fail("material name '" + n + "' is used twice");
+            if (ParseMaterial(n) != m) fail("material '" + n + "' does not parse back");
+        }
+        std::cout << "  ok    " << names.size() << " material classes are distinct\n";
+    }
+
+    // 5. Every self-test case is claimed by the adapter and produces something.
+    //
+    //    A name in the suite that no handler answers is a test measuring
+    //    nothing, and a case that renders silence is either a bug or a
+    //    deliberate assertion - so silence has to be declared rather than
+    //    discovered. The two cases below are the ones this project WANTS
+    //    silent, and they are the most important assertions in the file:
+    //    a melee swing through empty air and standing still holding a crate
+    //    must both produce no waveform at all.
+    {
+        static const std::set<std::string> kMustBeSilent = {
+            "melee-swing", "grav-hold-still", "hold-still",
+        };
+        int played = 0, silent = 0;
+        for (const auto& name : router.SelfTestNames()) {
+            if (!router.RunSelfTest(name, "right")) {
+                fail("self-test '" + name + "' is listed but has no handler");
+                continue;
+            }
+            const auto right = mixer.AnalyzeOffline(Controller::Right, 900);
+            const auto left = mixer.AnalyzeOffline(Controller::Left, 900);
+            const bool made = right.peak > 0.0f || left.peak > 0.0f;
+            const bool wantSilent = kMustBeSilent.count(name) != 0;
+            if (made && wantSilent) {
+                fail("'" + name + "' must be SILENT but produced a waveform");
+            } else if (!made && !wantSilent) {
+                fail("'" + name + "' produced no waveform at all");
+            }
+            if (made) ++played; else ++silent;
+        }
+        std::cout << "  ok    " << played << " signatures render, " << silent
+                  << " are deliberately silent\n";
+    }
+
+    // 6. The bHaptics key mapper classifies, drops and reports correctly.
+    //
+    //    Only meaningful for a game that has bHaptics support, so it is scoped
+    //    to that adapter. The three cases are the three OUTCOMES that matter:
+    //    a key that should map, a key that should be deliberately dropped
+    //    because a controller cannot represent it, and a key nothing should
+    //    claim. The third is the one worth guarding - a mapper that guesses
+    //    would fire the wrong sensation at the right moment, which is far
+    //    harder to notice than silence.
+    if (std::string(router.id()) == "hl2vr") {
+        struct Case { const char* key; const char* want; const char* why; };
+        static const Case kCases[] = {
+            // THE ORDERING TRAPS. Every one of these was a real bug at some
+            // point in writing the rule table, because the substrings overlap:
+            // "DamageFire" contains "fire", "CrowbarHit" contains "hit",
+            // "DamageExplosion" contains "damage", "ShotgunReload" contains
+            // "shotgun". Each pair below pins one of those decisions.
+            {"PistolFire_1",        "HL2_FIRE",       "names a weapon and an action"},
+            {"DamageFire_1",        "HL2_DAMAGE",     "burning is NOT a gunshot"},
+            {"EnvironmentFire_1",   "HL2_DAMAGE",     "standing in fire is still fire"},
+            {"CrowbarHit_1",        "HL2_MELEE_HIT",  "melee beats the word 'hit'"},
+            {"DamageBullet_1",      "HL2_DAMAGE",     "being shot is damage, not firing"},
+            {"ShockOnHandLeft_1",   "HL2_SHOCK",      "on the hand, not general damage"},
+            {"KickbackShotgun_1",   "HL2_FIRE",       "recoil is part of firing"},
+            {"PhysCannonLaunch_1",  "HL2_GRAV_LAUNCH","the gravity gun, launching"},
+            {"PhysCannonGrab_1",    "HL2_GRAV_GRAB",  "the gravity gun, capturing"},
+            {"DamageExplosion_1",   "HL2_EXPLOSION",  "a blast reads as a blast, not as damage"},
+            {"ShotgunReload_1",     "HL2_RELOAD",     "reload beats the weapon name"},
+            {"Heartbeat_1",         "",               "a vest can, a controller cannot"},
+            {"Footstep_1",          "",               "your hands are not your feet"},
+            {"AirboatRide_1",       "",               "a vehicle is not a hand"},
+            {"ZzzUnknownThing_1",   "",               "nothing should claim this"},
+        };
+        int mapped = 0, dropped = 0;
+        for (const auto& c : kCases) {
+            const auto m = MapBhapticsKey(c.key);
+            if (m.event != c.want) {
+                fail(std::string("bhaptics: ") + c.key + " -> '" + m.event +
+                     "', expected '" + c.want + "' (" + c.why + ")");
+            }
+            if (m.event.empty()) ++dropped; else ++mapped;
+            // Every outcome must carry a reason, mapped or not. An unexplained
+            // drop is indistinguishable from a bug.
+            if (m.rule == nullptr) {
+                fail(std::string("bhaptics: ") + c.key + " gave no reason");
+            }
+        }
+        // The damage TYPE has to reach the parameters, not just the event.
+        // Mapping DamageFire to HL2_DAMAGE and then losing the "fire" would
+        // silently collapse four distinct sensations back into one.
+        struct TypeCase { const char* key; const char* wantType; };
+        static const TypeCase kTypes[] = {
+            {"DamageFire_1",        "fire"},
+            {"EnvironmentFire_1",   "fire"},
+            {"DamageSpark_1",       "shock"},
+            {"DamageLaser_1",       "shock"},
+            {"EnvironmentPoison_1", "toxic"},
+            {"DamageBullet_1",      ""},
+        };
+        for (const auto& c : kTypes) {
+            const auto m = MapBhapticsKey(c.key);
+            const std::string want = std::string("20,0,") + c.wantType;
+            if (m.params != want) {
+                fail(std::string("bhaptics: ") + c.key + " params '" + m.params +
+                     "', expected '" + want + "'");
+            }
+        }
+
+        // A submit for a mapped key must actually reach the synthesis.
+        router.ResetForTest();
+        router.ResetEmitTrace();
+        router.Handle("BH_SUBMIT", "ShotgunFire_1");
+        const auto right = mixer.AnalyzeOffline(Controller::Right, 900);
+        const auto left = mixer.AnalyzeOffline(Controller::Left, 900);
+        if (right.peak <= 0.0f && left.peak <= 0.0f) {
+            fail("bhaptics: a mapped submit produced no waveform");
+        }
+        // ...and an unmapped one must reach nothing at all.
+        router.ResetEmitTrace();
+        router.Handle("BH_SUBMIT", "Heartbeat_1");
+        const auto quietR = mixer.AnalyzeOffline(Controller::Right, 900);
+        const auto quietL = mixer.AnalyzeOffline(Controller::Left, 900);
+        if (quietR.peak > 0.0f || quietL.peak > 0.0f) {
+            fail("bhaptics: a dropped key still produced a waveform");
+        }
+        std::cout << "  ok    bhaptics keys: " << mapped << " mapped, " << dropped
+                  << " correctly dropped, and a submit reaches synthesis\n";
+    }
+
+    // 7. Every profile name the adapters ask for actually exists.
+    {
+        int missing = 0;
+        for (int i = 0; i < kProfileCount; ++i) {
+            Profiles probe;
+            if (probe.Build(kProfileNames[i]).empty()) {
+                fail(std::string("profile '") + kProfileNames[i] + "' builds nothing");
+                ++missing;
+            }
+        }
+        if (missing == 0) {
+            std::cout << "  ok    " << kProfileCount << " tactile profiles all build\n";
+        }
+    }
+
+    std::cout << "\n";
+    if (failures == 0) {
+        std::cout << "All checks passed.\n";
+        return 0;
+    }
+    std::cout << failures << " check(s) FAILED.\n";
+    return 1;
+}
+
+int RunAnalyze(IGameAdapter& router, Mixer& mixer) {
     std::map<std::string, std::pair<int, float>> measured; // name -> {durMs, domHz}
     std::cout << "signature          hands   peak    rms   dur(ms)  domHz   limiter\n"
         "---------------------------------------------------------------------\n";
-    for (const auto& n : SelfTestNames()) {
-        RunSelfTest(router, n, "right");
+    for (const auto& n : router.SelfTestNames()) {
+        router.RunSelfTest(n, "right");
         // Which hands the effect really reached. Worth having in the table:
         // a signature that is unexpectedly bilateral is a design question, and
         // without this column the only way to find out was to feel it.
@@ -718,53 +1279,11 @@ int RunAnalyze(Router& router, Mixer& mixer) {
     for (const auto& [n, m] : measured) {
         if (m.first > 0 && m.second > 0.0f) sigs.push_back({n, m.first, m.second});
     }
-    auto family = [](const std::string& n) -> const char* {
-        if (n == "pistol" || n == "shotgun" || n == "smg" || n == "grenade") return "weapons";
-        if (n.rfind("glove", 0) == 0 || n.rfind("catch", 0) == 0) return "gravity glove";
-        // Reload mechanisms are grouped BY WEAPON, not into one pile.
-        //
-        // The grouping rule is co-occurrence: two effects need to be told
-        // apart when you meet them in the same moment. You rack a pistol slide
-        // seconds after seating its magazine, so those two must not feel
-        // alike - but a pistol slide and a shotgun shell are never performed
-        // in the same gesture, and forcing them apart would spend real design
-        // room solving a problem the hand does not have.
-        //
-        // Lumping them was making the report worse, not better: it flagged
-        // cross-weapon pairs as failures while the pairs that genuinely
-        // collide sat in the same list looking no more urgent.
-        if (n == "reload" || n == "chamber") return "pistol reload";
-        if (n == "shell-insert" || n == "shotgun-pump") return "shotgun reload";
-        // Five steps performed one after another - the tightest co-occurrence
-        // in the game. They were six copies of one waveform until this family
-        // existed to say so.
-        if (n.rfind("smg-", 0) == 0) return "smg reload";
-        // Bringing the support hand on and taking it off again.
-        if (n == "brace" || n == "unbrace") return "bracing";
-        // Storing and retrieving are the same gesture in opposite directions
-        // and you do both constantly, so they are the pair most worth
-        // separating in the whole handling set.
-        if (n == "store" || n == "retrieve" || n == "pickup") return "handling";
-        // Climbing: a ledge and a rung, met in the same traversal.
-        if (n == "mantle" || n == "ladder") return "climbing";
-        // Grabbed, then cut loose.
-        if (n.rfind("barnacle", 0) == 0) return "barnacle";
-        if (n.rfind("tripmine-", 0) == 0) return "hacking";
-        // Both are healing, and the game offers both in the same rooms.
-        if (n == "health-station" || n == "health-pen") return "healing";
-        // cover-mouth, levitate and combine-tank are deliberately UNGROUPED.
-        // Each is a one-off set-piece that never occurs alongside the others,
-        // so a ratio between them measures nothing a hand will ever compare.
-        // They are long sustained states and would collide with each other on
-        // duration by construction - which would be a permanent false alarm,
-        // and a report that cries wolf stops being read.
-        // impact-light and impact-heavy are ENERGY probes, not material ones -
-        // they deliberately reuse a material to show what energy scaling does,
-        // so matching that material is the correct result, not a collision.
-        if (n == "impact-light" || n == "impact-heavy") return nullptr;
-        if (n.rfind("impact-", 0) == 0) return "materials";
-        return nullptr;
-    };
+    // The grouping itself lives in the adapter, because it is a statement
+    // about one game's moment-to-moment play. Half-Life 2 lets you carry
+    // every weapon at once and switch freely, so its weapon family is larger
+    // and harder to keep separated than anything in Alyx.
+    auto family = [&router](const std::string& n) { return router.AnalyzeFamily(n); };
 
     std::cout << "\nperceptual collisions (same family, <1.5x apart on BOTH axes)\n"
                  "-------------------------------------------------------------\n";
@@ -810,7 +1329,7 @@ int RunAnalyze(Router& router, Mixer& mixer) {
     std::cout << "\nadaptive trigger recoil ladder\n"
                  "------------------------------\n"
                  "weapon      rest   kick   rate   reveal  pulses\n";
-    const auto ladder = RecoilLadder();
+    const auto ladder = router.RecoilLadder();
     for (const auto& r : ladder) {
         // Two independent ladders side by side: how hard the trigger is to
         // PULL, and how hard it KICKS. They were tuned blind of each other
@@ -876,7 +1395,7 @@ int RunAnalyze(Router& router, Mixer& mixer) {
 // can be explored by hand, and fire recoil on a predictable beat so the finger
 // is already in place when it lands. That makes the trigger testable without
 // launching the game, which is the whole point.
-int RunTriggerBench(Router& router, TriggerManager& triggers, const std::string& only) {
+int RunTriggerBench(IGameAdapter& router, TriggerManager& triggers, const std::string& only) {
     std::vector<std::string> weapons = {"PISTOL", "SMG", "SHOTGUN"};
     if (!only.empty()) {
         std::string up = only;
@@ -1235,8 +1754,8 @@ int RunPcmFormat(Capi& capi) {
     return 0;
 }
 
-int RunTests(Router& router, TriggerManager& triggers, Mixer& mixer, const std::string& only) {
-    auto names = SelfTestNames();
+int RunTests(IGameAdapter& router, TriggerManager& triggers, Mixer& mixer, const std::string& only) {
+    auto names = router.SelfTestNames();
     if (!only.empty()) {
         if (std::find(names.begin(), names.end(), only) == names.end()) {
             std::cout << "Unknown test '" << only << "'. Known tests:\n";
@@ -1263,7 +1782,7 @@ int RunTests(Router& router, TriggerManager& triggers, Mixer& mixer, const std::
         // gets mistaken for a bug.
         std::printf("  %-18s", n.c_str());
         std::fflush(stdout);
-        RunSelfTest(router, n, side);
+        router.RunSelfTest(n, side);
         const uint8_t felt = router.emitTrace();
         const char* where = (felt == 3) ? "both"
                           : (felt == 1) ? "left"
@@ -1291,6 +1810,22 @@ int RunTests(Router& router, TriggerManager& triggers, Mixer& mixer, const std::
     return 0;
 }
 
+// Builds the adapter for the selected game.
+//
+// This is the ONLY place in the middleware that names a game. Everything else
+// - the mixer, the trigger scheduler, recording, replay, analysis, the CLI -
+// runs against IGameAdapter and would not notice a third integration being
+// added beside these two.
+std::unique_ptr<IGameAdapter> MakeAdapter(const Config& cfg, Mixer& mixer,
+                                          TriggerManager& triggers,
+                                          const Profiles& profiles,
+                                          HmdChannel* hmd) {
+    if (cfg.isHl2vr()) {
+        return std::make_unique<Hl2vrAdapter>(mixer, triggers, cfg, profiles, hmd);
+    }
+    return std::make_unique<AlyxAdapter>(mixer, triggers, cfg, profiles, hmd);
+}
+
 int Main(int argc, char** argv) {
     SetConsoleOutputCP(CP_UTF8);
     std::signal(SIGINT, OnSignal);
@@ -1300,15 +1835,22 @@ int Main(int argc, char** argv) {
     std::string testName;
     std::string recordPath;
     std::string replayPath;
+    std::string impactsPath;
     std::string profilePath;
     bool doDumpProfiles = false;
     bool doTest = false, doInstallOnly = false, doUninstall = false;
     bool doLaunch = false, noInstall = false, forceDebug = false, doProbe = false;
     bool doSweep = false, doHands = false, doAnalyze = false;
+    bool doVerify = false;
+    bool doBhapticsScan = false;
     bool doHmdSweep = false, doHmdTest = false;
     bool doTriggerBench = false, doPcmFormat = false, doTriggerSweep = false;
     bool doRecoilLab = false, doDeepTest = false;
     std::string benchWeapon;
+    std::string gameOverride;
+    // --list-tests needs an adapter to ask, and the adapter needs the config,
+    // so it is recorded here and serviced once both exist.
+    bool doListTests = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -1318,10 +1860,7 @@ int Main(int argc, char** argv) {
             doTest = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') testName = argv[++i];
         }
-        else if (a == "--list-tests") {
-            for (const auto& n : SelfTestNames()) std::cout << n << "\n";
-            return 0;
-        }
+        else if (a == "--list-tests") doListTests = true;
         else if (a == "--record") {
             if (i + 1 < argc) recordPath = argv[++i];
             else { std::cerr << "--record needs a file path\n"; return 2; }
@@ -1345,15 +1884,25 @@ int Main(int argc, char** argv) {
         else if (a == "--deep-test") doDeepTest = true;
         else if (a == "--probe") doProbe = true;
         else if (a == "--analyze") doAnalyze = true;
+        else if (a == "--verify") doVerify = true;
+        else if (a == "--bhaptics-scan") doBhapticsScan = true;
         else if (a == "--sweep") doSweep = true;
         else if (a == "--hmd-sweep") doHmdSweep = true;
         else if (a == "--hmd-test") doHmdTest = true;
+        else if (a == "--impacts") { if (i + 1 < argc) impactsPath = argv[++i]; }
         else if (a == "--hands") doHands = true;
         else if (a == "--install") doInstallOnly = true;
         else if (a == "--uninstall") doUninstall = true;
         else if (a == "--launch") doLaunch = true;
         else if (a == "--no-install") noInstall = true;
         else if (a == "--debug") forceDebug = true;
+        else if (a == "--game") {
+            if (i + 1 < argc) gameOverride = argv[++i];
+            else {
+                std::cerr << "--game needs alyx or hl2vr\n";
+                return 2;
+            }
+        }
         else if (!a.empty() && a[0] == '-') {
             std::cerr << "Unknown option: " << a << "\n\n";
             PrintUsage();
@@ -1384,6 +1933,9 @@ int Main(int argc, char** argv) {
     } else {
         std::cout << "Config: none found, using auto-detected defaults\n";
     }
+    // --game overrides the config file, so one install can drive either game
+    // from two shortcuts without editing anything between runs.
+    if (!gameOverride.empty()) cfg.game = gameOverride;
     if (forceDebug) cfg.debug = true;
 
     cfg.AutoDetect();
@@ -1427,21 +1979,86 @@ int Main(int argc, char** argv) {
         std::cout << "\n";
     }
 
+    std::cout << "Game: "
+              << (cfg.isHl2vr() ? "Half-Life 2 VR" : "Half-Life: Alyx")
+              << "\n";
+
+    // --list-tests only needs an adapter, not hardware and not the game, so
+    // it is serviced here with a throwaway offline stack.
+    if (doListTests) {
+        Capi listCapi;
+        Mixer listMixer(listCapi, false);
+        TriggerManager listTriggers(listCapi, false);
+        listTriggers.SetEnabled(false);
+        auto listAdapter =
+            MakeAdapter(cfg, listMixer, listTriggers, profiles, nullptr);
+        for (const auto& t : listAdapter->SelfTestNames()) std::cout << t << "\n";
+        return 0;
+    }
+
     // Path validation is skipped for --test: hardware tests do not need the game.
     const bool doReplay = !replayPath.empty();
+    if (!impactsPath.empty()) return RunImpactAnalysis(impactsPath);
     if (!doTest && !doProbe && !doSweep && !doHands && !doAnalyze && !doReplay
         && !doTriggerBench && !doPcmFormat && !doTriggerSweep && !doRecoilLab && !doDeepTest
-        && !doHmdSweep && !doHmdTest) {
+        && !doHmdSweep && !doHmdTest && !doVerify && !doBhapticsScan) {
         std::string err;
         if (!cfg.Validate(err)) {
             std::cerr << "\n" << err << "\n";
             return 3;
         }
-        std::cout << "Half-Life: Alyx: " << cfg.hlaPath << "\n";
+        std::cout << (cfg.isHl2vr() ? "Half-Life 2 VR: " : "Half-Life: Alyx: ")
+                  << cfg.gamePath() << "\n";
     }
 
-    // ---- addon deployment ----------------------------------------------
-    if (doUninstall) {
+    // ---- game-side deployment -------------------------------------------
+    //
+    // The two games install completely differently and there is no useful
+    // abstraction over it: Alyx gets a folder of Lua that this executable
+    // carries inside itself, Half-Life 2 VR gets a descriptor plus a compiled
+    // plugin that has to be built separately against the Source SDK.
+    if (cfg.isHl2vr()) {
+        if (doUninstall) {
+            auto r = hl2vr::UninstallPlugin(cfg.hl2vrPath);
+            if (!r.ok) { std::cerr << r.error << "\n"; return 4; }
+            std::cout << (r.written.empty() ? "Nothing was installed.\n"
+                                            : "Removed the plugin and its descriptor.\n");
+            return 0;
+        }
+        if (!noInstall && !doVerify && !doBhapticsScan && !doTest && !doProbe
+            && !doSweep && !doHands
+            && !doAnalyze
+            && !doReplay && !doTriggerBench && !doPcmFormat && !doTriggerSweep
+            && !doRecoilLab && !doDeepTest && !doHmdSweep && !doHmdTest) {
+            auto r = hl2vr::InstallPlugin(cfg.hl2vrPath);
+            if (!r.ok) {
+                std::cerr << "\nPlugin install failed.\n  " << r.error << "\n";
+                return 4;
+            }
+            if (r.written.empty()) {
+                std::cout << "Plugin: up to date\n";
+            } else {
+                std::cout << "Plugin: installed/updated " << r.written.size()
+                          << " file(s)\n";
+            }
+            if (r.pluginMissing) {
+                // Said plainly rather than buried, because this is the one step
+                // that cannot be done for the user and everything downstream
+                // depends on it.
+                std::cout <<
+                    "! The plugin DLL has not been built, so no events will arrive.\n"
+                    "  It is a 32-bit Source server plugin and needs the Source SDK\n"
+                    "  2013 to compile - see src/games/hl2vr/plugin/README.md.\n"
+                    "  Everything else here works without it: --test, --analyze\n"
+                    "  and --replay all run the code path the game will drive.\n";
+            }
+        }
+        if (doInstallOnly) {
+            std::cout << "\nDone. Start Half-Life 2 VR, then run this again "
+                      << "without --install.\n";
+            return 0;
+        }
+    } else if (doUninstall) {
         auto r = UninstallAddon(cfg.hlaPath);
         if (!r.ok) { std::cerr << r.error << "\n"; return 4; }
         std::cout << (r.written.empty() ? "Nothing was installed.\n"
@@ -1454,7 +2071,9 @@ int Main(int argc, char** argv) {
         return 0;
     }
 
-    if (!noInstall && !doTest && !doProbe && !doSweep && !doHands && !doAnalyze && !doReplay
+    if (!cfg.isHl2vr()
+        && !noInstall && !doTest && !doProbe && !doSweep && !doHands && !doAnalyze && !doReplay
+        && !doVerify && !doBhapticsScan
         && !doTriggerBench && !doPcmFormat && !doTriggerSweep && !doRecoilLab && !doDeepTest
         && !doHmdSweep && !doHmdTest) {
         auto r = InstallAddon(cfg.hlaPath);
@@ -1482,6 +2101,22 @@ int Main(int argc, char** argv) {
         return 0;
     }
 
+    // ---- offline ---------------------------------------------------------
+    // Needs neither hardware nor the game installed - only the game RUNNING,
+    // which is a different thing and the reason it sits before every check.
+    if (doBhapticsScan) return RunBhapticsScan();
+
+    if (doVerify) {
+        Capi verifyCapi; // never loaded; nothing here touches hardware
+        Mixer verifyMixer(verifyCapi, false);
+        verifyMixer.SetMaster(cfg.master);
+        TriggerManager verifyTriggers(verifyCapi, false);
+        verifyTriggers.SetEnabled(false);
+        auto verifyAdapter =
+            MakeAdapter(cfg, verifyMixer, verifyTriggers, profiles, nullptr);
+        return RunVerify(*verifyAdapter, verifyMixer);
+    }
+
     // ---- hardware -------------------------------------------------------
     if (doAnalyze) {
         Capi offlineCapi; // never loaded; the offline render does not touch it
@@ -1489,7 +2124,8 @@ int Main(int argc, char** argv) {
         offlineMixer.SetMaster(cfg.master);
         TriggerManager offlineTriggers(offlineCapi, false);
         offlineTriggers.SetEnabled(false);
-        Router offlineRouter(offlineMixer, offlineTriggers, cfg, profiles);
+        auto offline = MakeAdapter(cfg, offlineMixer, offlineTriggers, profiles, nullptr);
+        IGameAdapter& offlineRouter = *offline;
         // --replay --analyze renders a recorded session with no hardware at
         // all, which is what makes a recording useful to someone who cannot
         // put the headset on.
@@ -1568,8 +2204,9 @@ int Main(int argc, char** argv) {
             std::cout << "Headset rumble: unavailable - " << why << "\n";
         }
     }
-    Router router(mixer, triggers, cfg, profiles,
-                  hmdChannel.enabled() ? &hmdChannel : nullptr);
+    auto adapter = MakeAdapter(cfg, mixer, triggers, profiles,
+                               hmdChannel.enabled() ? &hmdChannel : nullptr);
+    IGameAdapter& router = *adapter;
     mixer.Start();
 
     if (doHmdSweep || doHmdTest) {
@@ -1632,23 +2269,57 @@ int Main(int argc, char** argv) {
 
     // ---- run ------------------------------------------------------------
     if (doLaunch) {
-        ResetConsoleLog(cfg.hlaPath);
         std::string e;
-        if (LaunchGame(e)) std::cout << "Launching Half-Life: Alyx through Steam...\n";
-        else std::cout << "! " << e << "\n";
+        bool launched = false;
+        if (cfg.isHl2vr()) {
+            launched = hl2vr::LaunchGame(e);
+        } else {
+            // Truncated so the tailer never replays the previous session.
+            ResetConsoleLog(cfg.hlaPath);
+            launched = LaunchGame(e);
+        }
+        if (launched) {
+            std::cout << "Launching " << router.gameName()
+                      << " through Steam...\n";
+        } else {
+            std::cout << "! " << e << "\n";
+        }
     }
 
     // Prefer the Source 2 network console: lower latency than tailing the log,
     // and it lets us push commands back into the game. Falls back silently to
     // console.log so an existing -condebug setup keeps working untouched.
+    // Two candidates per game, fast one first.
+    //
+    // Alyx: the Source 2 network console, falling back to console.log.
+    // Half-Life 2 VR: the plugin's own UDP socket, falling back to
+    // console.log - the plugin prints every event as well as sending it, so
+    // the slow path works even if the socket cannot be opened.
     NetConsole netcon(29000);
-    LogTail logtail(cfg.consoleLogPath());
+    UdpListener udp(29001);
+    // Half-Life 2 VR announces its own haptic events to the bHaptics port, and
+    // needs nothing installed to do it. Tried first for that reason: it is the
+    // only route that works before the server plugin has been built.
+    BhapticsListener bhaptics;
+    LogTail logtail(cfg.isHl2vr() ? cfg.hl2vrConsoleLogPath()
+                                  : cfg.consoleLogPath());
+    Transport& fast = cfg.isHl2vr() ? static_cast<Transport&>(udp)
+                                    : static_cast<Transport&>(netcon);
+    // A third candidate, for Half-Life 2 VR only. The plugin carries more
+    // information when it exists, so it stays the preferred source; this is
+    // what makes the integration work at all when it does not.
+    Transport* extra = cfg.isHl2vr() ? static_cast<Transport*>(&bhaptics) : nullptr;
     Transport* transport = nullptr;
     bool announcedTransport = false;
 
-    std::cout << "\nWaiting for Half-Life: Alyx...  (Ctrl+C to stop)\n"
-              << "  network console : 127.0.0.1:29000  (add -netconport 29000)\n"
-              << "  or console.log  : " << cfg.consoleLogPath() << "  (add -condebug)\n\n";
+    std::cout << "\nWaiting for " << router.gameName()
+              << "...  (Ctrl+C to stop)\n";
+    for (const auto& line : router.ConnectionHelp()) {
+        std::cout << "  " << line << "\n";
+    }
+    std::cout << "  log path        : "
+              << (cfg.isHl2vr() ? cfg.hl2vrConsoleLogPath() : cfg.consoleLogPath())
+              << "\n\n";
 
     DeliveryMonitor delivery;
     Recorder recorder;
@@ -1669,8 +2340,10 @@ int Main(int argc, char** argv) {
         const auto now = std::chrono::steady_clock::now();
         // Reconnect logic: try the fast path first each time we have nothing.
         if (transport == nullptr || !transport->Connected()) {
-            if (netcon.Connect()) {
-                transport = &netcon;
+            if (fast.Connect()) {
+                transport = &fast;
+            } else if (extra != nullptr && extra->Connect()) {
+                transport = extra;
             } else if (logtail.Connect()) {
                 transport = &logtail;
             } else {
@@ -1695,9 +2368,10 @@ int Main(int argc, char** argv) {
             // Latency is not a detail here. Events arriving late AND bunched
             // is what turns distinct effects into overlapping mush.
             lastNetconTry = now;
-            if (netcon.Connect()) {
-                transport = &netcon;
-                std::cout << "Upgraded to the network console - much lower latency\n";
+            if (fast.Connect()) {
+                transport = &fast;
+                std::cout << "Upgraded to " << fast.name()
+                          << " - much lower latency\n";
             }
         }
 

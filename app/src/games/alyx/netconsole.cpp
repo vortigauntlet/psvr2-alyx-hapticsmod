@@ -1,4 +1,4 @@
-#include "transport.h"
+#include "games/alyx/netconsole.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -16,11 +16,6 @@ namespace psvr2 {
 namespace {
 constexpr uint64_t kInvalid = ~0ull;
 } // namespace
-
-// Default: nothing to wait on, so just yield the interval.
-void Transport::WaitForData(int timeoutMs) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(std::max(0, timeoutMs)));
-}
 
 // --- network console -------------------------------------------------------
 
@@ -160,40 +155,5 @@ bool NetConsole::SendCommand(const std::string& command) {
 }
 
 // --- log tail ---------------------------------------------------------------
-
-bool LogTail::Connect() {
-    if (file_.is_open()) return true;
-    file_.open(path_, std::ios::binary);
-    if (!file_) return false;
-    // Start at the end so a previous session's log is not replayed.
-    file_.seekg(0, std::ios::end);
-    pos_ = file_.tellg();
-    return true;
-}
-
-std::vector<std::string> LogTail::Poll() {
-    std::vector<std::string> out;
-    if (!file_.is_open()) {
-        Connect();
-        return out;
-    }
-
-    file_.clear();
-    file_.seekg(0, std::ios::end);
-    const auto end = file_.tellg();
-    if (end < pos_) pos_ = 0; // game restarted and truncated the log
-    if (end == pos_) return out;
-
-    file_.seekg(pos_);
-    std::string line;
-    while (std::getline(file_, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        out.push_back(std::move(line));
-    }
-    file_.clear();
-    file_.seekg(0, std::ios::end);
-    pos_ = file_.tellg();
-    return out;
-}
 
 } // namespace psvr2

@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include "capi.h"
+#include "core/capi.h"
 
 #include <array>
 #include <chrono>

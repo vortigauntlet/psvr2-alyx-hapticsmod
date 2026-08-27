@@ -1,4 +1,4 @@
-#include "install.h"
+#include "games/alyx/alyx_install.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
