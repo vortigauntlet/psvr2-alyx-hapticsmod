@@ -1,4 +1,4 @@
-# Posting materials — v8.0
+# Posting materials — v1.0
 
 Everything below is ready to copy. The zip and its checksum are in `dist/`.
 
@@ -105,8 +105,10 @@ NOT IMPLEMENTED) and is explicit about what is inferred, what is a guess, and wh
 known to be unreachable. If something feels wrong, `--analyze` output plus what you
 felt is the most useful bug report you can send.
 
-Source and download: <LINK>
-SHA256 of the zip is in the release notes.
+Source and download: https://github.com/vortigauntlet/psvr2-alyx-hapticsmod/releases/latest
+
+SHA256 of the zip:
+`2DA91004A26AD36A967B6CE8A64CC3C2B9D3C15039FE30FCD15CB496255395CD`
 
 ---
 
@@ -114,8 +116,8 @@ SHA256 of the zip is in the release notes.
 
 Same as above, minus the Reddit framing. Attach:
 
-- `dist/psvr2-alyx-haptics-8.0.zip`
-- `dist/psvr2-alyx-haptics-8.0.sha256`
+- `dist/psvr2-alyx-haptics-1.0.zip`
+- `dist/psvr2-alyx-haptics-1.0.sha256`
 
 ---
 

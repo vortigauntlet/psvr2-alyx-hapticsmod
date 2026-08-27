@@ -348,7 +348,15 @@ std::string ExeDir() {
 // feel wrong" and there is no way to know which build it came from, whether
 // the reporter already has the fix for the thing they are reporting, or
 // whether their profile file predates the values it overrides.
-constexpr const char* kVersion = "8.0";
+// The FIRST public release, so it is 1.0 regardless of how many internal
+// iterations preceded it. Shipping the private iteration count as the public
+// version just invites "where are the other seven releases?" from people who
+// can only ever see this one.
+//
+// The game script keeps its own number (below). It is a compatibility marker
+// used to verify what actually landed in the game folder, not a product
+// version, and the two are not expected to match.
+constexpr const char* kVersion = "1.0";
 
 void PrintVersion() {
     std::cout << "PSVR2 Alyx Haptics " << kVersion << "\n"

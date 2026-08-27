@@ -584,15 +584,35 @@ gesture. `cover-mouth`, `levitate` and `combine-tank` are deliberately
 ungrouped: each is a one-off set-piece, they would collide with each other on
 duration by construction, and a report that cries wolf stops being read.
 
-### What this revision does NOT claim
+### Hardware verdicts — **HARDWARE**
 
-**None of it has been felt.** Every change here is CODE or RUNTIME. The
-measurements say these effects are now distinct, carry energy, and are not being
-squashed by the limiter — none of which is the same as saying they feel right.
-`catch-light`'s fast shimmer against `catch-heavy`'s slow wobble is the change
-most likely to need a verdict from a hand, because tremolo is the one axis the
-collision report cannot see and it is now carrying the light end of the game's
-signature interaction.
+Bench-tested on real Sense controllers, 2026-08-27. Five signatures were put up
+for judgement because each carried a risk `--analyze` structurally cannot check.
+All five were reported good.
+
+| Signature | What was at risk | Verdict |
+|---|---|---|
+| `catch-light` / `catch-heavy` | The mass layer is separated by **tremolo** — fast shimmer against slow wobble — and the collision report is blind to rhythm. If this axis did not land, the light end of the game's signature interaction was resting on nothing measurable. | **good** |
+| `glove-lock` | First time in the project's history it has actually been *two* ticks. It is also pinned as the faintest cue in the game, so the failure mode was "correct but imperceptible". | **good** |
+| `cover-mouth` | Rebuilt with no transient at all and deliberately sited at the edge of noticing. | **good** |
+| `smg-open` / `smg-close` | The extremes of the new five-step reload grid, 461 ms against 82 ms. If these two read as one mechanism the grid had failed. | **good** |
+
+The tremolo result is the one that matters most. It confirms that **rhythm is a
+usable design axis on this hardware**, which the rest of this revision leans on
+in several places the collision report cannot verify — cardboard's four-hit
+crush, metal's slow pulse, the barnacle's coiling grip. Those were all reasoned
+by analogy to the same principle and now have one direct measurement behind
+them.
+
+### What this revision still does NOT claim
+
+The five above were felt **on the bench**, one at a time, with no game running.
+That is not the same as being felt in play, where effects overlap, fire in
+sequence, and compete with each other for the limiter. Nothing here has yet been
+confirmed **in-game**.
+
+The remaining 47 signatures have not been individually judged on hardware at
+all. They are RUNTIME: measured, distinct, and not clipping.
 
 ---
 
