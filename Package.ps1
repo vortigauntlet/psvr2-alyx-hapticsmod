@@ -50,7 +50,25 @@ if ($versionLine -match '(\d+\.\d+)') { $version = $Matches[1] } else { $version
 Write-Host "Version: $version" -ForegroundColor DarkGray
 
 $release = "$root\release"
-if (Test-Path $release) { Remove-Item -Recurse -Force $release }
+
+# Files the USER creates in release\ and would be furious to lose. A blanket
+# Remove-Item here used to delete a recorded --record session and any
+# hand-tuned haptic_profiles.cfg - a genuinely destructive thing for a build
+# script to do, and it happened to a real recording mid-session. Preserve them
+# across the rebuild.
+$preserve = @("*.log", "haptic_profiles.cfg", "*.session")
+$stash = Join-Path ([System.IO.Path]::GetTempPath()) ("psvr2_pkg_" + [guid]::NewGuid().ToString("N"))
+$saved = @()
+if (Test-Path $release) {
+    New-Item -ItemType Directory -Path $stash | Out-Null
+    foreach ($pattern in $preserve) {
+        foreach ($f in (Get-ChildItem -Path $release -Filter $pattern -File -ErrorAction SilentlyContinue)) {
+            Copy-Item $f.FullName -Destination $stash
+            $saved += $f.Name
+        }
+    }
+    Remove-Item -Recurse -Force $release
+}
 New-Item -ItemType Directory -Path $release | Out-Null
 
 Copy-Item $exe $release
@@ -124,6 +142,12 @@ $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
 $exeHash = (Get-FileHash "$release\psvr2_alyx_haptics.exe" -Algorithm SHA256).Hash
 [System.IO.File]::WriteAllText("$dist\psvr2-alyx-haptics-$version.sha256",
     "$hash  psvr2-alyx-haptics-$version.zip`n$exeHash  psvr2_alyx_haptics.exe`n", $utf8)
+
+if ($saved.Count -gt 0) {
+    Copy-Item (Join-Path $stash "*") -Destination $release
+    Write-Host ("Preserved: " + ($saved -join ", ")) -ForegroundColor DarkGray
+}
+if (Test-Path $stash) { Remove-Item -Recurse -Force $stash }
 
 Write-Host ""
 Write-Host "Release ready: $release" -ForegroundColor Green

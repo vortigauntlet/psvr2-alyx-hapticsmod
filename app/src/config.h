@@ -25,6 +25,21 @@ struct Config {
     // so it is the most heuristic thing in the build. Off switch kept close to
     // hand in case it misfires on doors that swing by themselves.
     bool doors = true;
+
+    // Headset rumble. OFF by default and deliberately so: on PC the PSVR2's
+    // headset motor only responds after the headset has been jailbroken, and
+    // most people have not done that. Enabling it for them would mean a
+    // feature that silently does nothing, which is worse than an honest
+    // opt-in.
+    //
+    // Nothing breaks when it is on and the headset is not jailbroken - the
+    // value is simply ignored by hardware that is not listening. See hmd.h.
+    bool hmd = false;
+
+    // Minimum damage before a hit reaches the HEADSET, as opposed to the
+    // controllers. Deliberately higher than minDamage: a graze that is worth a
+    // flinch in the hands is not worth a jolt to the face.
+    float hmdMinDamage = 12.0f;
     bool debug = false;
     int pollMs = 12;
 

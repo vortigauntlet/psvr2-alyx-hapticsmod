@@ -202,6 +202,8 @@ bool Config::Load(const std::string& path, std::string& error) {
         else if (key == "adaptive_triggers") adaptiveTriggers = Truthy(value);
         else if (key == "physics") physics = Truthy(value);
         else if (key == "doors") doors = Truthy(value);
+        else if (key == "hmd") hmd = Truthy(value);
+        else if (key == "hmd_min_damage") hmdMinDamage = num(12.0f);
         else if (key == "debug") debug = Truthy(value);
         else if (key == "poll_ms") pollMs = std::max(4, static_cast<int>(num(12.0f)));
         else if (key == "min_impact_impulse") minImpactImpulse = num(150.0f);

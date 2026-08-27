@@ -11,8 +11,11 @@
 // Nothing here is guessed. If the toolkit changes its ABI, Load() fails
 // cleanly on the missing export rather than calling through a bad pointer.
 //
-// psvr2_toolkit_set_hmd_rumble is deliberately NOT bound: headset vibration is
-// out of scope for this project.
+// psvr2_toolkit_set_hmd_rumble IS bound, but optionally. Headset rumble was
+// out of scope for a long time and is still off by default; see hmd.h for the
+// design rule that governs what is allowed to use it. Its absence from an
+// older toolkit must not fail the whole load, so unlike the six required
+// exports it is resolved best-effort and guarded by hasHmdRumble().
 
 #pragma once
 
@@ -185,6 +188,22 @@ public:
         return setTrigger_ ? setTrigger_(c, cmd) : kResultInvalidParameter;
     }
 
+    // --- Headset rumble ----------------------------------------------------
+    //
+    // Upstream: PSVR2TK_EXPORT int psvr2_toolkit_set_hmd_rumble(uint8_t rumbleHz)
+    //
+    // Read out of the shipped DLL's export table and confirmed against
+    // upstream's psvr2tk_capi.h. Note what the parameter is: a FREQUENCY, not
+    // an amplitude. There is no level control and no duration - the value is a
+    // state that persists until it is set again, so 0 is "off" and anything
+    // else runs until stopped. Everything in hmd.cpp follows from that.
+    //
+    // Optional: an older toolkit may not export it at all.
+    bool hasHmdRumble() const { return setHmdRumble_ != nullptr; }
+    int SetHmdRumble(uint8_t hz) const {
+        return setHmdRumble_ ? setHmdRumble_(hz) : kResultInvalidParameter;
+    }
+
 private:
     bool LoadOne(const std::wstring& path);
 
@@ -194,6 +213,7 @@ private:
     using FnWritePcm = int(__cdecl*)(Controller, const unsigned char*);
     using FnWaitForPcm = int(__cdecl*)();
     using FnSetTrigger = int(__cdecl*)(Controller, const TriggerCommand&);
+    using FnSetHmdRumble = int(__cdecl*)(uint8_t);
 
     HMODULE module_ = nullptr;
     std::wstring path_;
@@ -203,6 +223,7 @@ private:
     FnWritePcm writePcm_ = nullptr;
     FnWaitForPcm waitForPcm_ = nullptr;
     FnSetTrigger setTrigger_ = nullptr;
+    FnSetHmdRumble setHmdRumble_ = nullptr;
     bool initialised_ = false;
     PcmCapabilities pcm_;
     // Kept so a failed Load() can explain which candidate failed and why.

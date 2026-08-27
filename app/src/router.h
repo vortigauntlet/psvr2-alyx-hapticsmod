@@ -23,11 +23,17 @@ enum class Material {
 Material ParseMaterial(const std::string& s);
 const char* MaterialName(Material m);
 
+class HmdChannel;
+
 class Router {
 public:
+    // `hmd` is optional and may stay null: the headset channel is off by
+    // default, and every use of it is guarded. A null here must behave
+    // identically to the build that had no headset support at all.
     Router(Mixer& mixer, TriggerManager& triggers, const Config& cfg,
-           const Profiles& profiles)
-        : mixer_(mixer), triggers_(triggers), cfg_(cfg), profiles_(profiles) {
+           const Profiles& profiles, HmdChannel* hmd = nullptr)
+        : mixer_(mixer), triggers_(triggers), cfg_(cfg), profiles_(profiles),
+          hmd_(hmd) {
         primary_ = cfg.handedness == "left" ? Controller::Left : Controller::Right;
     }
 
@@ -94,6 +100,7 @@ private:
     Mixer& mixer_;
     TriggerManager& triggers_;
     const Config& cfg_;
+    HmdChannel* hmd_ = nullptr;
     const Profiles& profiles_;
     Controller primary_ = Controller::Right;
     std::string weapon_ = "HANDS";

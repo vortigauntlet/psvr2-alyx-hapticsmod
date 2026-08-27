@@ -33,6 +33,7 @@
 #include "capi.h"
 #include "config.h"
 #include "haptics.h"
+#include "hmd.h"
 #include "install.h"
 #include "profiles.h"
 #include "router.h"
@@ -406,6 +407,9 @@ void PrintUsage() {
         "  --analyze        render every signature offline and print what it\n"
         "                   actually produces - no headset or hardware needed\n"
         "  --sweep          frequency response check - which Hz you actually feel\n"
+        "  --hmd-sweep      headset frequency response - needs hmd=true, and a\n"
+        "                   jailbroken headset to be felt at all\n"
+        "  --hmd-test       play the four headset patterns\n"
         "  --hands          left/right localisation check\n"
         "\n"
         "  --debug          verbose trigger/PCM/impact diagnostics\n"
@@ -514,6 +518,104 @@ void PlayTone(Mixer& mixer, TriggerManager& triggers, Controller c,
 // some frequency, every "bright" material signature collapses into the same
 // dull thud and effects stop being distinguishable no matter how they are
 // designed. This measures it on the actual hardware instead of assuming.
+// Headset frequency response.
+//
+// The direct counterpart of RunSweep for the grip actuator and of
+// --trigger-sweep for the trigger motor. Both of those overturned a design
+// assumption the moment they were run: the grip sweep revealed a ~520 Hz
+// ceiling that had silently collapsed every material into its body layer, and
+// the trigger sweep reversed a frequency rule inferred from an uncontrolled
+// three-weapon comparison.
+//
+// The headset patterns in hmd.cpp have had no such measurement. They are
+// reasoned from the single fact that the parameter is a frequency, and nothing
+// more. This is how they stop being guesses.
+int RunHmdSweep(HmdChannel& hmd) {
+    static const int kHz[] = {
+        8, 12, 16, 20, 26, 32, 40, 50, 60, 75, 90, 110, 140, 180, 220,
+    };
+
+    std::cout <<
+        "Headset frequency response check\n"
+        "--------------------------------\n"
+        "Put the headset ON. Each value runs for about 0.8 s, with a gap.\n"
+        "Note which ones you actually FEEL, which read as pressure rather\n"
+        "than buzz, and where they stop being felt at all.\n"
+        "\n"
+        "If you feel nothing for ANY of these, the headset is very likely not\n"
+        "jailbroken. Nothing is broken in that case - hardware that is not\n"
+        "listening simply ignores the value.\n\n";
+
+    if (!hmd.enabled()) {
+        std::cout << "Headset channel is not enabled - nothing to sweep.\n";
+        return 1;
+    }
+
+    for (int hz : kHz) {
+        if (!g_running) break;
+        std::cout << "  " << hz << " Hz" << std::endl;
+        HmdPattern one{"sweep", {{static_cast<uint8_t>(hz), 800}, {0, 0}}};
+        hmd.Play(one, 9);
+        const auto t0 = std::chrono::steady_clock::now();
+        while (g_running &&
+               std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(1100)) {
+            hmd.Tick(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+    hmd.Stop();
+
+    std::cout << "\nDone. Tell me:\n"
+        "  1. which values you could feel at all\n"
+        "  2. which felt like PRESSURE rather than buzzing\n"
+        "  3. the highest one still clearly felt\n"
+        "  4. whether any were unpleasant on the face - that is a hard limit,\n"
+        "     not a preference, and anything unpleasant gets removed\n";
+    return 0;
+}
+
+// Plays the four headset patterns in turn, announcing each.
+int RunHmdTest(HmdChannel& hmd) {
+    std::cout <<
+        "Headset patterns\n"
+        "----------------\n"
+        "Put the headset ON. Each pattern is announced before it plays.\n\n";
+
+    if (!hmd.enabled()) {
+        std::cout << "Headset channel is not enabled - nothing to play.\n";
+        return 1;
+    }
+
+    struct Case { const char* label; HmdPattern pattern; };
+    const Case cases[] = {
+        {"cover-mouth       your hand over your own face, hiding from Jeff", hmdfx::CoverMouth()},
+        {"barnacle          a tongue has you and is hauling you up", hmdfx::Barnacle()},
+        {"barnacle-release  it dropped you", hmdfx::BarnacleRelease()},
+        {"hurt (light)      a hit worth flinching at", hmdfx::Hurt(0.35f)},
+        {"hurt (heavy)      a hit that rattles you", hmdfx::Hurt(1.0f)},
+    };
+
+    for (const auto& c : cases) {
+        if (!g_running) break;
+        std::cout << "  " << c.label << std::endl;
+        hmd.Play(c.pattern, 9);
+        const auto t0 = std::chrono::steady_clock::now();
+        while (g_running &&
+               std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(1600)) {
+            hmd.Tick(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+    hmd.Stop();
+
+    std::cout << "\nDone. These are CODE level - reasoned, never measured.\n"
+                 "Run --hmd-sweep first if they feel wrong: the response curve\n"
+                 "is what decides whether these numbers make any sense.\n";
+    return 0;
+}
+
 int RunSweep(Mixer& mixer, TriggerManager& triggers) {
     static const float kFreqs[] = {
         40, 60, 80, 100, 120, 150, 180, 220, 260, 300, 350, 400, 500, 600, 800,
@@ -1203,6 +1305,7 @@ int Main(int argc, char** argv) {
     bool doTest = false, doInstallOnly = false, doUninstall = false;
     bool doLaunch = false, noInstall = false, forceDebug = false, doProbe = false;
     bool doSweep = false, doHands = false, doAnalyze = false;
+    bool doHmdSweep = false, doHmdTest = false;
     bool doTriggerBench = false, doPcmFormat = false, doTriggerSweep = false;
     bool doRecoilLab = false, doDeepTest = false;
     std::string benchWeapon;
@@ -1243,6 +1346,8 @@ int Main(int argc, char** argv) {
         else if (a == "--probe") doProbe = true;
         else if (a == "--analyze") doAnalyze = true;
         else if (a == "--sweep") doSweep = true;
+        else if (a == "--hmd-sweep") doHmdSweep = true;
+        else if (a == "--hmd-test") doHmdTest = true;
         else if (a == "--hands") doHands = true;
         else if (a == "--install") doInstallOnly = true;
         else if (a == "--uninstall") doUninstall = true;
@@ -1325,7 +1430,8 @@ int Main(int argc, char** argv) {
     // Path validation is skipped for --test: hardware tests do not need the game.
     const bool doReplay = !replayPath.empty();
     if (!doTest && !doProbe && !doSweep && !doHands && !doAnalyze && !doReplay
-        && !doTriggerBench && !doPcmFormat && !doTriggerSweep && !doRecoilLab && !doDeepTest) {
+        && !doTriggerBench && !doPcmFormat && !doTriggerSweep && !doRecoilLab && !doDeepTest
+        && !doHmdSweep && !doHmdTest) {
         std::string err;
         if (!cfg.Validate(err)) {
             std::cerr << "\n" << err << "\n";
@@ -1349,7 +1455,8 @@ int Main(int argc, char** argv) {
     }
 
     if (!noInstall && !doTest && !doProbe && !doSweep && !doHands && !doAnalyze && !doReplay
-        && !doTriggerBench && !doPcmFormat && !doTriggerSweep && !doRecoilLab && !doDeepTest) {
+        && !doTriggerBench && !doPcmFormat && !doTriggerSweep && !doRecoilLab && !doDeepTest
+        && !doHmdSweep && !doHmdTest) {
         auto r = InstallAddon(cfg.hlaPath);
         if (!r.ok) {
             std::cerr << "\nAddon install failed.\n  " << r.error << "\n";
@@ -1449,10 +1556,30 @@ int Main(int argc, char** argv) {
     TriggerManager triggers(capi, cfg.debug);
     triggers.SetMaster(cfg.triggerMaster);
     triggers.SetEnabled(cfg.adaptiveTriggers);
-    Router router(mixer, triggers, cfg, profiles);
+    // Headset channel. Off unless hmd=true, and non-fatal by construction:
+    // the controllers must behave identically whether or not it works.
+    int exitCode = 0;
+    HmdChannel hmdChannel;
+    if (cfg.hmd || doHmdSweep || doHmdTest) {
+        std::string why;
+        if (hmdChannel.Enable(&capi, why)) {
+            std::cout << "Headset rumble: ON  (needs a jailbroken headset to be felt)\n";
+        } else {
+            std::cout << "Headset rumble: unavailable - " << why << "\n";
+        }
+    }
+    Router router(mixer, triggers, cfg, profiles,
+                  hmdChannel.enabled() ? &hmdChannel : nullptr);
     mixer.Start();
 
-    int exitCode = 0;
+    if (doHmdSweep || doHmdTest) {
+        exitCode = doHmdSweep ? RunHmdSweep(hmdChannel) : RunHmdTest(hmdChannel);
+        hmdChannel.Stop();
+        triggers.Reset();
+        mixer.Stop();
+        capi.Shutdown();
+        return exitCode;
+    }
     if (doSweep || doHands) {
         exitCode = doSweep ? RunSweep(mixer, triggers) : RunHands(mixer, triggers);
         triggers.Reset();
@@ -1629,6 +1756,8 @@ int Main(int argc, char** argv) {
         }
 
         triggers.Tick();
+        hmdChannel.Tick(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
 
         if (transport == nullptr && !warnedNoLog &&
             now - started > std::chrono::seconds(20)) {
@@ -1662,6 +1791,7 @@ int Main(int argc, char** argv) {
         std::cout << "Recorded " << recorder.count() << " events to " << recordPath << "\n"
                   << "  Replay it with:  --replay \"" << recordPath << "\"\n";
     }
+    hmdChannel.Stop();   // never leave the headset buzzing
     triggers.Reset();
     mixer.Stop();
     capi.Shutdown();

@@ -46,6 +46,10 @@ bool Capi::LoadOne(const std::wstring& candidate) {
     auto write = reinterpret_cast<FnWritePcm>(GetProcAddress(m, "psvr2_toolkit_write_pcm"));
     auto wait = reinterpret_cast<FnWaitForPcm>(GetProcAddress(m, "psvr2_toolkit_wait_for_pcm"));
     auto trigger = reinterpret_cast<FnSetTrigger>(GetProcAddress(m, "psvr2_toolkit_set_trigger_effect"));
+    // Optional - resolved after the required six so its absence cannot make a
+    // working toolkit look broken.
+    auto hmd = reinterpret_cast<FnSetHmdRumble>(
+        GetProcAddress(m, "psvr2_toolkit_set_hmd_rumble"));
 
     if (!init || !deinit || !active || !write || !wait || !trigger) {
         lastError_ = ERROR_PROC_NOT_FOUND;
@@ -62,6 +66,7 @@ bool Capi::LoadOne(const std::wstring& candidate) {
     writePcm_ = write;
     waitForPcm_ = wait;
     setTrigger_ = trigger;
+    setHmdRumble_ = hmd;  // may be null; guarded by hasHmdRumble()
     return true;
 }
 

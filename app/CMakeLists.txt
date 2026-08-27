@@ -38,6 +38,7 @@ add_executable(psvr2_alyx_haptics
     src/profiles.cpp
     src/install.cpp
     src/transport.cpp
+    src/hmd.cpp
     "${LUA_EMBED_HEADER}")
 
 add_dependencies(psvr2_alyx_haptics lua_embed)

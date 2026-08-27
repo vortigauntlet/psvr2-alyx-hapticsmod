@@ -1,5 +1,7 @@
 #include "router.h"
 
+#include "hmd.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -1042,6 +1044,16 @@ void Router::Handle(const std::string& event, const std::string& param) {
         if (d > 0.55f) {
             triggers_.PushOverlay(Controller::Both, trig::Vibration(4, 5, 55), 90, 5, "hurt");
         }
+        // Head channel, gated harder than the hands. A graze that earns a
+        // flinch in the palms does not earn a jolt to the face, so this uses
+        // its own higher threshold rather than reusing minDamage - otherwise
+        // the headset would fire on chip damage and become the ambient noise
+        // floor this project exists to avoid.
+        //
+        // Highest priority: a hit interrupts anything.
+        if (hmd_ != nullptr && damage >= cfg_.hmdMinDamage) {
+            hmd_->Play(hmdfx::Hurt(d), 6);
+        }
         if (cfg_.debug) {
             std::cout << "[Hurt] damage=" << damage << " scale=" << d << "\n";
         }
@@ -1771,6 +1783,10 @@ void Router::Handle(const std::string& event, const std::string& param) {
         skin.delay = kSampleRate * 40 / 1000;
         v.push_back(skin);
         Emit(Controller::Both, std::move(v), "COVER_MOUTH");
+        // Head channel: a hand pressed to the face is the clearest
+        // head-contact event in the game. Low priority - if anything more
+        // urgent is happening to your head, that wins.
+        if (hmd_ != nullptr) hmd_->Play(hmdfx::CoverMouth(), 1);
         return;
     }
     if (event == "LEVITATE") {
@@ -1829,6 +1845,9 @@ void Router::Handle(const std::string& event, const std::string& param) {
         v.push_back(Transient(330, 0.40f, 10, 6));
         v.push_back(Body(240, 130, 0.58f, 150, 88));
         Emit(Controller::Both, std::move(v), "BARNACLE_RELEASE");
+        // Head channel: priority above the grab it terminates, so the release
+        // always interrupts the haul rather than being swallowed by it.
+        if (hmd_ != nullptr) hmd_->Play(hmdfx::BarnacleRelease(), 4);
         return;
     }
 
@@ -1855,6 +1874,9 @@ void Router::Handle(const std::string& event, const std::string& param) {
         haul.delay = kSampleRate * 30 / 1000;
         v.push_back(haul);
         Emit(Controller::Both, std::move(v), "BARNACLE");
+        // Head channel: something has physical hold of your whole body and is
+        // lifting it. Priority 3 - outranks Jeff, yields to the release.
+        if (hmd_ != nullptr) hmd_->Play(hmdfx::Barnacle(), 3);
         return;
     }
     if (event == "HEALTH_PEN") {

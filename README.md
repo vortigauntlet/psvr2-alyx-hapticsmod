@@ -4,7 +4,7 @@ Bespoke haptics and adaptive triggers for **Half-Life: Alyx** on **PSVR2 Sense
 controllers**, via the PSVR2Toolkit CAPI.
 
 No DLL injection. No pattern scanning. No patched Valve binaries.
-Headset rumble is deliberately not used (for now...)
+Headset rumble is supported but **off by default** - see below.
 
 It does add one line to one Valve **text** file — see
 [How the game side loads](#how-the-game-side-loads). That is reversible and
@@ -202,7 +202,7 @@ So the following are **deliberately absent**, not missing:
 | Kill confirmation | A HUD cue in haptic clothing. Nothing is felt. (It also fired for *every* entity dying anywhere on the map.) |
 | Impacts of thrown objects | Your hand let go. It is not connected to that collision. |
 | Directional damage with no hand relationship | Nothing physically reaches the palm. |
-| Headset rumble | Out of scope for this project. |
+| Headset rumble *(on the hand channel)* | Your skull does not recoil. It has its own channel and its own short list - see below. |
 
 `MANTLE` and `LADDER` are kept, because gripping a ledge and closing a hand
 around a rung are genuine hand-contact events.
@@ -353,6 +353,80 @@ separating. Direction of pitch alone did not do it. What does is what the hand
 is actually doing: putting something away is a push that **ends in a seat**, so
 it takes time and stops; pulling something out is a yank that is over the moment
 the object clears.
+
+## Headset rumble
+
+Off by default. Turn it on with `hmd=true` in `psvr2_haptics.cfg`.
+
+**It only does something on a jailbroken headset.** On PC the PSVR2's headset
+motor ignores the command otherwise - no error, no crash, the controllers
+behave identically. So enabling it costs nothing if you have not jailbroken,
+and there is no need to check first.
+
+```bash
+psvr2_alyx_haptics.exe --hmd-test     # play the patterns
+psvr2_alyx_haptics.exe --hmd-sweep    # which frequencies you can feel
+```
+
+### The rule, generalised
+
+Adding a second actuator does not repeal the golden rule, it restates it:
+
+> **Vibrate the body part that would actually feel it.**
+
+So the headset is not a second channel for hand events at lower volume, and it
+is emphatically not somewhere to revive the cues that were deleted for being
+HUD readouts. It answers one question - would your **head or face** feel this?
+In Alyx that is four things:
+
+| Event | Why the head feels it |
+|---|---|
+| `COVER_MOUTH` | Your own hand is pressed against your own face. The most literal head-contact event in the game. |
+| `BARNACLE` | A tongue has your whole body and is hauling it upward. |
+| `BARNACLE_RELEASE` | It let go. |
+| `HURT` | A hit hard enough to snap your head - gated by `hmd_min_damage`, higher than the hand threshold. |
+
+Weapon fire is **not** on this list. Neither are impacts, gravity gloves, or
+anything else your hands do. A shotgun kicks your hands; it does not kick your
+skull.
+
+**On headcrabs specifically:** Alyx raises no event for one latching onto your
+face. The damage it deals arrives as `player_hurt`, so a headcrab hit reaches
+the headset through `HURT` like any other injury - but nothing in the game
+lets this build distinguish "headcrab on your face" from "shot in the leg",
+and it does not pretend to.
+
+### What the hardware gives you
+
+```c
+int psvr2_toolkit_set_hmd_rumble(uint8_t rumbleHz)
+```
+
+One byte, and it is a **frequency** - there is no amplitude and no duration.
+The value persists until it is set again. Three consequences:
+
+- Nothing here can be made "softer" or "louder". Designing by loudness is not
+  available, so character comes from pitch, length and **rhythm** alone.
+- Every effect is a scheduled sequence ending in an explicit `0`, not a
+  fire-and-forget.
+- `Hurt(severity)` therefore scales **length and pulse count**, never level.
+
+### Failing safe
+
+A stuck-on headset rumble is the worst failure this program could produce - it
+is strapped to your face and you cannot see a console. Four guards:
+
+- **Off by default.**
+- **A watchdog.** No sequence may hold the motor past 2.5 s, even a malformed one.
+- **Permanent disable** on a hard error - one message, then the channel is
+  never touched again. The hand channel is unaffected.
+- **Forced off at shutdown**, including on Ctrl+C.
+
+These frequencies are **CODE level**: reasoned from the constraint above, never
+measured. The grip actuator got its response curve from `--sweep` and the
+trigger motor got its from `--trigger-sweep`, and both overturned a design
+assumption the moment they ran. The headset has had neither. `--hmd-sweep`
+exists to fix that.
 
 ## Weapon and ammunition state
 

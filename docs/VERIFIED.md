@@ -51,7 +51,7 @@ iterating on tactile design possible at all.
 | Adaptive triggers | **HARDWARE** | `rc=0`, and increased resistance was physically felt. |
 | Network console (`-netconport`) | **STATIC** | Implemented, preferred over log tailing. **Not confirmed connected in-game.** |
 | `console.log` tailing (`-condebug`) | **HARDWARE** | The route currently in use. |
-| Headset rumble | **NOT IMPL** | Deliberately never bound. Out of scope by instruction. |
+| Headset rumble | **CODE** | Bound optionally (absent export does not fail the load) and off by default. Four patterns, reasoned from the frequency-only ABI, **never measured** - `--hmd-sweep` exists to fix that. |
 
 ---
 
@@ -501,7 +501,7 @@ Each of these was removed or refused for a stated reason, not overlooked.
 | **TELEPORT_START / FINISH** | Same. `teleport_finish` is retained internally as a heartbeat for arming the physics sampler, but emits nothing. |
 | **KILL** | Fired for *every* entity dying anywhere on the map, including distant NPCs. A kill is a HUD cue in haptic clothing — no hand feels it. |
 | **Released-object impacts** | The hand is not connected to the object any more. |
-| **Headset rumble** | Out of scope by instruction. |
+| **Headset rumble for HAND events** | Recoil, impacts and gloves stay off the headset. Your skull does not recoil. The headset has its own four-event list; see the README. |
 | **Footsteps / ambient buzz** | Never implemented. |
 | **Native `server.dll` / `vphysics2` hooks** | Four hard-coded byte signatures that break on every Alyx patch, in exchange for one number (exact clip size). The vphysics2 hook is a *pickup flag*, not a collision callback — it does not provide the collision API it is sometimes assumed to. |
 
@@ -603,6 +603,38 @@ in several places the collision report cannot verify — cardboard's four-hit
 crush, metal's slow pulse, the barnacle's coiling grip. Those were all reasoned
 by analogy to the same principle and now have one direct measurement behind
 them.
+
+### Headset rumble — **CODE**, and honestly so
+
+Added after a public request for it, as an opt-in. Everything about it is at
+the CODE level and none of it has been felt, because verifying it needs a
+jailbroken headset.
+
+| Claim | Level |
+|---|---|
+| `psvr2_toolkit_set_hmd_rumble` exists in the shipped DLL | **STATIC** — read out of the PE export table; 12 exports, this is one |
+| Its signature is `int(uint8_t rumbleHz)` | **STATIC** — confirmed against upstream `psvr2tk_capi.h`, not inferred |
+| Binding it does not disturb the hand channel | **RUNTIME** — `--analyze` output is byte-identical to the build before this change |
+| The channel enables, plays and exits cleanly | **RUNTIME** — `--hmd-test` runs to completion |
+| The four patterns feel like anything | **CODE** — untested. Needs a jailbroken headset |
+| The frequencies are the right frequencies | **CODE** — reasoned only. `--hmd-sweep` is the fix |
+
+Two things worth stating plainly rather than burying:
+
+**We cannot detect from software whether the headset will respond.** The probe
+calls `set_hmd_rumble(0)`, which is the off value and therefore the one call
+guaranteed safe to make blind. Its return code is recorded but deliberately not
+used to gate availability, because this DLL is already known to return an
+uninitialised register from `write_pcm` and 1-instead-of-0 from `wait_for_pcm`
+— treating a non-zero here as failure would disable the feature for everyone
+based on ABI noise. A headset that has not been jailbroken simply ignores the
+value, which is exactly the safe fallback wanted.
+
+**No headcrab event exists.** The request that prompted this was specifically
+about facehuggers. Alyx raises nothing when one latches on; the damage arrives
+as `player_hurt` like any other injury, so it reaches the headset through
+`HURT` and cannot be told apart from being shot. Claiming facehugger support
+would be inventing a semantic the game does not expose.
 
 ### What this revision still does NOT claim
 
