@@ -46,6 +46,61 @@ struct Builtin {
 // same numbers that were arrived at by measurement with --analyze.
 const std::vector<Builtin>& BuiltinTable() {
     static const std::vector<Builtin> table = {
+        // ---------------------------------------------------------------------
+        // Glide width: widen DOWNWARD ONLY. Never raise the onset.
+        //
+        // Most bodies here glided by 1.10-1.17x, well under the ~1.5x skin needs
+        // to resolve pitch at all - a parameter being paid for and not felt.
+        //
+        // The first attempt widened them around their MEAN frequency, holding
+        // domHz fixed so the weapon pitch ladder could not shift. It measured
+        // beautifully: domHz moved at most 1 Hz, collisions stayed clear.
+        // On hardware every weapon read THINNER and the build was rejected.
+        //
+        // The reason is that ResponseGain() cannot do what it claims above
+        // ~300 Hz. Widening around the mean throws the ONSET up to 340-510 Hz,
+        // and the compensation answers with digital gain - but a voice coil at
+        // 450 Hz physically displaces less than at 250 Hz for the same drive.
+        // Digital gain cannot buy back force the actuator is not producing, so
+        // the effect simply spends more of its life in the weak part of the
+        // band. Trimming amplitude to protect the limiter made it worse again.
+        //
+        // So: hold f0 exactly where it is and pull f1 DOWN into the 120-300 Hz
+        // strong band. Each effect now spends MORE of its life in the powerful
+        // region than before, not less. Amplitudes are untouched - trimming is
+        // what 'thin' means, and there is nothing to pay for here because the
+        // lower tail sits where the actuator is strongest.
+        //
+        // domHz drops as a result (the pistol 267 -> 236) and that is accepted:
+        // the collision report is what protects the ladder, and it still reads
+        // none. Measured cost across both games: no limiter moved at all, and
+        // rms went UP on hurt (+9%) and HL2 smg, unchanged on both pistols.
+        //
+        // Weapons already gliding wide - both shotguns, the grenade, the
+        // gravity pull, the magnum, the RPG - are untouched. So are the
+        // crossbow and the shock, whose identity is the ABSENCE of low end: a
+        // downward sweep is exactly the wrong move for them.
+        // ---------------------------------------------------------------------
+        // The transient moved DOWN (470 -> 380 Hz) and UP in level (0.34 ->
+        // 0.45), with the body staggered 10 ms behind it.
+        //
+        // 470 Hz is in the region the hardware feedback established this build
+        // cannot deliver: ResponseGain() answers with digital gain, but the coil
+        // displaces too little there for that to become force. The pistol's
+        // 'crack' was therefore mostly absent from the hand, and the weapon was
+        // carried almost entirely by its body.
+        //
+        // This could not be fixed before the stagger existed. Lowering the
+        // transient toward the body's 300 Hz onset made the two sum coherently
+        // instead of sitting clear of each other, and the limiter went 1.00 ->
+        // 0.94 for no gain. Moving the body 10 ms back removes the collision,
+        // and then the accent can be both lower and larger for free:
+        // peak actually DROPS 0.92 -> 0.87, rms holds, limiter stays 1.00.
+        //
+        // Net delivered output of the accent is up roughly 47% (0.45 x 0.78
+        // response, against 0.34 x 0.70). No modulation is added, deliberately -
+        // a pistol is one clean snap, and the shudder that suits the shotgun
+        // would read here as a mechanism rattling.
         {"PISTOL_FIRE", "A single meaty crack. The middle rung of the length ladder.",
          // Weapons are now separated primarily by DURATION, not pitch.
          //
@@ -57,11 +112,42 @@ const std::vector<Builtin>& BuiltinTable() {
          //
          // The ladder is now roughly 85 / 175 / 540 ms - each step about 2-3x
          // the last, comfortably past the threshold in both directions.
-         {{"transient", 470, 0.34f, 10, 6, 0, 0, 0, 0, 0, 0},
-          {"body", 300, 265, 0.86f, 175, 78, 0, 0, 0, 0, 0}}},
+         {{"transient", 380, 0.45f, 10, 6, 0, 0, 0, 0, 0, 0},
+          {"body", 300, 195, 0.86f, 175, 78, 0, 0, 0, 0, 10}}},
 
+        // Reported as not feeling UNIQUE, despite clearing the collision report
+        // on both axes (3.0x the pistol's duration, 2.7x its pitch). The report
+        // was not wrong, it was blind: it measures duration and pitch, and this
+        // effect's problem was in neither.
+        //
+        // It had NO modulation at all and a transient of 0.34 - the same accent
+        // amplitude as the pistol. So the heaviest weapon in the game had the
+        // attack of a handgun and, per the note on Voice::amDepth, the temporal
+        // signature of a solid knock. It was not a shotgun, it was a long low
+        // version of everything else.
+        //
+        // Three changes, and the third is what pays for the other two:
+        //
+        //   crack   transient 0.34 -> 0.60. A shotgun is a punch and then a
+        //           rumble; this had only the rumble.
+        //   shudder am 0.28 at 6 Hz, about 3.5 heaves across the effect - the
+        //           weapon shaking itself out. Nothing else in Alyx is both
+        //           this long and modulated, and skin reads temporal pattern
+        //           far better than it reads pitch.
+        //   stagger the body starts 16 ms AFTER the transient instead of on top
+        //           of it. Both used to strike at t=0 and sum past the ceiling,
+        //           so every attempt to enlarge the crack just fed the limiter
+        //           and got squashed - raising the transient alone took the
+        //           limiter from 0.94 to 0.90 and bought nothing.
+        //
+        // Separating them by 16 ms gives the crack the peak to itself and the
+        // mass arrives behind it, which is also the physically honest order.
+        // Result: peak 0.96 -> 0.94, rms 0.352 -> 0.349, limiter 0.94 -> 0.98.
+        // The body could go back UP from 0.76 to 0.84 - reversing a cut made
+        // when it had to share the attack window - and still limit less than
+        // before. That headroom is what the shudder is spent on.
         {"SHOTGUN_FIRE", "Heaviest thing in the game: a long fall into the low lobe.",
-         {{"transient", 200, 0.34f, 16, 10, 0, 0, 0, 0, 0, 0},
+         {{"transient", 200, 0.60f, 16, 10, 0, 0, 0, 0, 0, 0},
           // Brought down from 0.89. At that level the shotgun drove its own
           // limiter to 0.74 and the empty-chamber variant to 0.67, and what a
           // limiter squashes first is the sharp transient - so the heaviest
@@ -74,8 +160,26 @@ const std::vector<Builtin>& BuiltinTable() {
           // length, not from the last notch of level - the same conclusion the
           // trigger work reached independently when 8/8 turned out to push
           // back less than 7.
-          {"body", 160, 45, 0.76f, 520, 300, 0, 0, 0, 0, 0}}},
+          {"body", 160, 45, 0.84f, 520, 300, 0.28f, 6.0f, 0, 0, 16}}},
 
+        // The second body layer is STAGGERED 10 ms off the attack, and that one
+        // number is worth more than any frequency here.
+        //
+        // The SMG was the quietest Alyx weapon (rms 0.102) and simultaneously
+        // the most limited (0.90) - a contradiction that means it was never
+        // loud, it was COLLIDING. Three layers all struck at t=0, summed past
+        // the ceiling, and the limiter took the difference out of the transient,
+        // which is the part that makes a shot read as a shot.
+        //
+        // Moving one supporting layer out of the attack window fixes both ends
+        // at once: peak 0.98 -> 0.95, limiter 0.90 -> 0.95, and rms UP 5% to
+        // 0.107. Nothing was made louder; energy that was being squashed now
+        // survives. Duration and domHz are unchanged.
+        //
+        // 10 ms is deliberate. The plateau runs from 6 to 28 ms, so this is not
+        // a knife-edge, but GLOVE_LOCK proves 32-36 ms reads as two distinct
+        // ticks - and an SMG round must stay one event. 10 ms is clear of the
+        // collision and nowhere near the point where skin separates them.
         {"SMG_FIRE", "A short hard spit. The SHORTEST thing in the game.",
          // The bottom rung of the length ladder, at roughly half the pistol.
          //
@@ -89,19 +193,19 @@ const std::vector<Builtin>& BuiltinTable() {
          // weakness is not. Short-and-quiet is what made the old clicks
          // imperceptible; short-and-hard is a crack.
          {{"transient", 450, 0.38f, 8, 5, 0, 0, 0, 0, 0, 0},
-          {"body", 330, 300, 0.92f, 85, 34, 0, 0, 0, 0, 0},
-          {"body", 180, 155, 0.34f, 60, 26, 0, 0, 0, 0, 0}}},
+          {"body", 330, 215, 0.92f, 85, 34, 0, 0, 0, 0, 0},
+          {"body", 180, 118, 0.34f, 60, 26, 0, 0, 0, 0, 10}}},
 
         {"GRENADE_FIRE", "Rising rather than falling - a throw, not an impact.",
          {{"body", 150, 350, 0.70f, 300, 160, 0.25f, 9.0f, 0, 0, 0}}},
 
         {"MELEE_FIRE", "Low and heavy with no metallic edge.",
          {{"transient", 190, 0.32f, 16, 10, 0, 0, 0, 0, 0, 0},
-          {"body", 135, 100, 1.02f, 340, 175, 0.30f, 5.5f, 0, 0, 0}}},
+          {"body", 135, 85, 1.02f, 340, 175, 0.30f, 5.5f, 0, 0, 0}}},
 
         {"DEFAULT_FIRE", "Anything without its own profile.",
          {{"transient", 320, 0.36f, 12, 8, 0, 0, 0, 0, 0, 0},
-          {"body", 260, 230, 0.90f, 160, 70, 0, 0, 0, 0, 0}}},
+          {"body", 260, 170, 0.90f, 160, 70, 0, 0, 0, 0, 0}}},
 
         {"GLOVE_LOCK", "Acquisition: a two-part latch - tick, then it catches.",
          // Reported too weak. Every layer sat at 460-470 Hz, the weakest part
@@ -217,7 +321,7 @@ const std::vector<Builtin>& BuiltinTable() {
 
         {"HURT", "Scaled by how hard you were hit; these are the full-strength values.",
          {{"transient", 240, 0.30f, 18, 12, 0, 0, 0, 0, 0, 0},
-          {"body", 130, 95, 0.79f, 190, 110, 0, 0, 0, 0, 0},
+          {"body", 130, 82, 0.79f, 190, 110, 0, 0, 0, 0, 0},
           {"texture", 300, 1.1f, 0.14f, 70, 50, 0, 0, 0, 0, 0}}},
 
         // -------------------------------------------------------------------
@@ -247,8 +351,8 @@ const std::vector<Builtin>& BuiltinTable() {
         // -------------------------------------------------------------------
 
         {"HL2_PISTOL_FIRE", "9mm. The middle rung, and the weapon fired most.",
-         {{"transient", 470, 0.34f, 10, 6, 0, 0, 0, 0, 0, 0},
-          {"body", 300, 265, 0.86f, 105, 50, 0, 0, 0, 0, 0}}},
+         {{"transient", 380, 0.45f, 10, 6, 0, 0, 0, 0, 0, 0},
+          {"body", 300, 195, 0.86f, 105, 50, 0, 0, 0, 0, 10}}},
 
         {"HL2_MAGNUM_FIRE", ".357. A violent crack rather than a boom - high, hard and over.",
          {{"transient", 260, 0.44f, 18, 11, 0, 0, 0, 0, 0, 0},
@@ -261,7 +365,7 @@ const std::vector<Builtin>& BuiltinTable() {
          // amplitude despite the length: brevity is the signature, weakness is
          // not - short-and-quiet is imperceptible, short-and-hard is a crack.
          {{"transient", 420, 0.30f, 8, 5, 0, 0, 0, 0, 0, 0},
-          {"body", 245, 210, 0.88f, 62, 26, 0, 0, 0, 0, 0}}},
+          {"body", 245, 160, 0.88f, 62, 26, 0, 0, 0, 0, 0}}},
 
         {"HL2_AR2_FIRE", "Pulse rifle. Electrical, not mechanical - carried by fast tremolo.",
          // The one weapon in either game that is not a chemical explosion, and
@@ -271,20 +375,37 @@ const std::vector<Builtin>& BuiltinTable() {
          {{"transient", 430, 0.28f, 9, 5, 0, 0, 0, 0, 0, 0},
           {"body", 350, 310, 0.80f, 185, 90, 0.55f, 38.0f, 0, 0, 0}}},
 
+        // Same crack / shudder / stagger rework as the Alyx shotgun above, but
+        // held to 0.78 and 0.24 rather than 0.84 and 0.28. This profile has a
+        // second consumer Alyx does not have: the double-barrel secondary
+        // rescales it to 0.82x frequency and 1.25x length, which drops the body
+        // to ~37 Hz where ResponseGain() applies its largest boost. At the Alyx
+        // values the single shot measured fine and the DOUBLE regressed to 0.83.
+        // Backing off here leaves both better than before: single 0.94 -> 1.00,
+        // double 0.85 -> 0.89.
         {"HL2_SHOTGUN_FIRE", "The heaviest discharge: a long fall into the low lobe.",
          // Level held down deliberately. At full amplitude this drove its own
          // limiter hard, and what a limiter takes first is the sharp transient -
          // so the heaviest weapon would pay for its weight by losing its edge.
          // Weight comes from pitch and length, not from the last notch of level.
-         {{"transient", 200, 0.34f, 16, 10, 0, 0, 0, 0, 0, 0},
-          {"body", 160, 45, 0.76f, 470, 275, 0, 0, 0, 0, 0}}},
+         {{"transient", 200, 0.60f, 16, 10, 0, 0, 0, 0, 0, 0},
+          {"body", 160, 45, 0.78f, 470, 275, 0.24f, 6.0f, 0, 0, 16}}},
 
+        // Transient dropped 500 -> 400 Hz. Same reasoning as the glide rule
+        // above, applied to the attack: 500 Hz is deep in the region where the
+        // actuator cannot deliver what ResponseGain() promises, so the accent
+        // was expensive in headroom and weak in the hand at the same time.
+        // This is the second most limited effect in the game and doctrine says
+        // what a limiter squashes first is the transient - so the bowstring was
+        // paying for its brightness by losing its edge. 0.83 -> 0.87 limiter
+        // for 2% rms. The body is deliberately NOT widened: past this point
+        // every extra step cost rms and bought no further headroom.
         {"HL2_CROSSBOW_FIRE", "A bowstring, not a gunshot: NO low-frequency energy at all.",
          // Every other weapon here puts its force at 150-300 Hz. This one has
          // nothing below 350, which makes it unmistakable regardless of how the
          // durations end up - a release of stored tension has no explosion
          // behind it, and the absence is the identity.
-         {{"transient", 500, 0.44f, 9, 5, 0, 0, 0, 0, 0, 0},
+         {{"transient", 400, 0.44f, 9, 5, 0, 0, 0, 0, 0, 0},
           {"body", 450, 400, 0.72f, 85, 38, 0, 0, 0, 0, 0},
           {"texture", 380, 1.8f, 0.16f, 70, 40, 0, 0, 0, 0, 0}}},
 
@@ -307,7 +428,7 @@ const std::vector<Builtin>& BuiltinTable() {
         {"HL2_DAMAGE", "Scaled by how hard you were hit; these are the full-strength values.",
          {{"transient", 300, 0.55f, 14, 9, 0, 0, 0, 0, 0, 0},
           {"body", 175, 95, 0.85f, 195, 110, 0, 0, 0, 0, 0},
-          {"texture", 260, 0.9f, 0.30f, 140, 95, 0, 0, 0, 0, 0}}},
+          {"texture", 260, 0.9f, 0.30f, 140, 95, 0, 0, 0, 0, 12}}},
 
         {"HL2_DAMAGE_FIRE", "Burning. A sustained scald with no impact in it at all.",
          // Ported from the bHaptics Half-Life integration, which splits damage
@@ -318,11 +439,16 @@ const std::vector<Builtin>& BuiltinTable() {
          {{"body", 200, 175, 0.62f, 520, 300, 0.45f, 11.0f, 22.0f, 31.0f, 0},
           {"texture", 300, 0.7f, 0.30f, 480, 300, 0, 0, 0, 0, 0}}},
 
+        // Transient dropped 500 -> 400 Hz, for the reason given on the crossbow.
+        // shock-hand shares this profile and was the MOST limited effect in the
+        // game at 0.82; both it and damage-shock gain 0.03-0.04 of headroom for
+        // 1% rms. Everything here still sits above 380 Hz, so the identity -
+        // the sharpest and brightest thing in the game - is untouched.
         {"HL2_DAMAGE_SHOCK", "Electricity. The sharpest, brightest, shortest thing here.",
          // The opposite of fire on every axis, which is how the two stay apart:
          // instantaneous where fire sustains, bright where fire is mid, and
          // carried by a very fast tremolo that nothing else in the game uses.
-         {{"transient", 500, 0.60f, 8, 4, 0, 0, 0, 0, 0, 0},
+         {{"transient", 400, 0.60f, 8, 4, 0, 0, 0, 0, 0, 0},
           {"body", 430, 380, 0.78f, 95, 40, 0.65f, 55.0f, 0, 0, 0}}},
 
         {"HL2_DAMAGE_TOXIC", "Poison. Slow, low and wrong - it arrives after the hit.",

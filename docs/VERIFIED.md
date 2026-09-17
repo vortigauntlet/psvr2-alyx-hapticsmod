@@ -669,6 +669,304 @@ all. They are RUNTIME: measured, distinct, and not clipping.
 
 ---
 
+## Glide width, and a response-curve limit found the hard way (2026-08-29)
+
+### `ResponseGain()` over-promises above ~300 Hz — **HARDWARE VERIFIED**
+
+The most useful thing to come out of this round, and it came from a rejected
+build.
+
+Most weapon bodies glided only 1.10-1.17x, under the ~1.5x skin needs to
+resolve pitch — a parameter being paid for and not felt. The first fix widened
+them at **constant mean frequency**, so `domHz` moved at most 1 Hz across both
+games and the collision report stayed clear. It measured perfectly.
+
+On hardware **every weapon read thinner** and the build was rejected.
+
+Holding the mean while widening necessarily throws the ONSET up to 340-510 Hz.
+`ResponseGain()` answers with digital gain — but a voice coil at 450 Hz
+physically displaces less than at 250 Hz for the same drive, and digital gain
+cannot buy back force the actuator is not producing. The response table is
+therefore **not a valid equal-loudness compensation at the top of the band**;
+it flattens the measured signal, not the felt one. Trimming amplitudes to
+protect the limiter compounded it.
+
+**Rule taken from this: never raise a voice's onset frequency to buy anything.**
+Above roughly 300 Hz, amplitude on paper and force in the hand come apart.
+
+### The version that shipped instead — **RUNTIME**
+
+Hold `f0` exactly as it was and pull `f1` **down** into the 120-300 Hz strong
+band, so each effect spends *more* of its life where the actuator is powerful.
+No amplitude was trimmed anywhere — trimming is what "thin" means.
+
+| effect | before | after | ratio | rms | limiter |
+|---|---|---|---|---|---|
+| Alyx pistol | 300→265 | 300→195 | 1.54x | 0.151 → 0.151 | 1.00 → 1.00 |
+| Alyx SMG | 330→300 | 330→215 | 1.53x | 0.104 → 0.102 | 0.90 → 0.90 |
+| Alyx hurt | 130→95 | 130→82 | 1.59x | 0.216 → **0.236** | 0.97 → 0.97 |
+| Alyx melee | 135→100 | 135→85 | 1.59x | — | — |
+| HL2 pistol | 300→265 | 300→195 | 1.54x | 0.121 → 0.121 | 1.00 → 1.00 |
+| HL2 SMG | 245→210 | 245→160 | 1.53x | 0.090 → **0.091** | 1.00 → 1.00 |
+
+**No limiter value moved anywhere in either game.** `domHz` drops (pistol
+267 → 236) and that is accepted rather than engineered around: the collision
+report is what protects the pitch ladder, and it still reads *none* for both
+games.
+
+Untouched: both shotguns, the grenade, the gravity pull, the magnum and the RPG
+already glide wide. The crossbow and the shock are defined by the ABSENCE of
+low end, so a downward sweep is precisely wrong for them. The RPG was tried at
+a lower onset (110 Hz) and reverted — that lands in the 80-110 Hz dip, where
+the compensation applies a 1.4x boost and drove its limiter from 0.99 to 0.83.
+
+### Fine-tuning pass, and three things that did NOT pan out — **RUNTIME**
+
+The downward-widening above was confirmed on hardware as a clear improvement.
+Looking for more, most of the obvious moves measured as nothing:
+
+1. **Widening the tails further does nothing.** Pistol rms is 0.151 whether the
+   tail sits at 195 Hz or 125 Hz — flat across every value tried, for all three
+   weapons. The force came from REMOVING the high onset, not from adding low
+   tail, because the response curve is already flat across 125-300 Hz and an
+   exponential decay front-loads the energy anyway. Going wider only lowers
+   `domHz` and spends pitch separation for nothing.
+2. **Lowering transients hurts where the limiter is healthy.** The pistol goes
+   1.00 → 0.94 as its transient drops 470 → 330, because a lower accent starts
+   summing constructively with the body onset instead of sitting clear of it.
+3. **Materials are the wrong target entirely.** They are built on five
+   deliberate pitch SLOTS (~55/130/200/310/470) with glass and plastic sharing
+   one on purpose. Widening those collapses the separation that makes them
+   distinguishable at all.
+
+What did survive: dropping the crossbow and shock **transients** from 500 to
+400 Hz. Those two were the most limited effects in the game, and doctrine says
+what a limiter squashes first is the transient — so they were paying for their
+brightness by losing their edge, while a 500 Hz accent cannot deliver what the
+compensation promises anyway.
+
+| effect | limiter | rms |
+|---|---|---|
+| crossbow | 0.83 → **0.87** | 0.110 → 0.108 |
+| damage-shock | 0.86 → **0.90** | 0.080 → 0.079 |
+| shock-hand | 0.82 → **0.85** | 0.087 → 0.086 |
+
+Their bodies are deliberately NOT widened: past the transient change every
+further step cost rms and bought no headroom. Everything in both effects still
+sits above 380 Hz, so "the sharpest, brightest thing here" still is. Alyx is
+untouched by this pass.
+
+### Layer collision, not loudness — **RUNTIME**
+
+The Alyx SMG was the QUIETEST weapon in the game (rms 0.102) and at the same
+time the MOST limited (0.90). That combination is not a loud effect being tamed
+— it is three layers all striking at t=0, summing past the ceiling, and the
+limiter taking the difference out of the transient.
+
+Staggering one supporting body layer 10 ms off the attack fixed both ends at
+once:
+
+| | before | after |
+|---|---|---|
+| peak | 0.98 | 0.95 |
+| rms | 0.102 | **0.107** |
+| limiter | 0.90 | **0.95** |
+
+Nothing was made louder. Energy that was being squashed now survives. Duration
+and `domHz` are unchanged. The plateau runs from 6 to 28 ms so this is not a
+knife-edge; 10 ms was chosen because `GLOVE_LOCK` establishes that 32-36 ms
+reads as two distinct ticks, and an SMG round must stay one event.
+
+The same trick was tried on every other stacked effect and mostly did NOT
+replicate: the explosion oscillated between 0.78 and 0.82 with no plateau, the
+crossbow spiked at one delay only, and Alyx `hurt` got slightly worse. Those
+are phase alignment, not a mechanism, and were left alone. Only `HL2_DAMAGE`
+showed a consistent plateau (0.89 → 0.90, rms +2%) and took the change.
+
+**Generalisable rule: when an effect is limited but not loud, suspect layer
+collision before touching any amplitude.**
+
+### The shotgun: what the collision report cannot see — **RUNTIME**
+
+Reported from hardware as not feeling *unique*, while passing the collision
+report comfortably: 3.0x the pistol's duration and 2.7x its pitch. The report
+was not wrong, it was **blind**. It measures duration and pitch, and the
+shotgun's problem was in neither.
+
+It had **no modulation at all** and a transient of **0.34 — the same accent
+amplitude as the pistol.** So the heaviest weapon in the game had the attack of
+a handgun and, per the note on `Voice::amDepth`, the temporal signature of a
+solid knock. It was a long low version of everything else.
+
+Every attempt to simply enlarge the crack failed, because the transient and the
+body both struck at t=0 and summed past the ceiling — raising the transient
+alone took the limiter from 0.94 to **0.90** and bought nothing. The fix was
+the layer-stagger rule found on the SMG: start the body **16 ms after** the
+transient, which is also the physically honest order (crack, then mass).
+
+| | before | after |
+|---|---|---|
+| Alyx shotgun | rms 0.352, lim 0.94 | rms 0.349, lim **0.98** |
+| Alyx shotgun-empty | rms 0.357, lim 0.94 | rms 0.351, lim **0.95** |
+| HL2 shotgun | rms 0.337, lim 0.94 | rms 0.321, lim **1.00** |
+| HL2 shotgun-double | rms 0.385, lim 0.85 | rms 0.371, lim **0.89** |
+
+With the attack window no longer shared, the body could go back **up** (0.76 →
+0.84) — reversing a cut made when it had to fight the transient — and still
+limit less than before. That reclaimed headroom is what pays for a 0.28-depth
+6 Hz shudder, roughly 3.5 heaves across the effect: the weapon shaking itself
+out. Nothing else in Alyx is both this long and modulated.
+
+HL2 is held to 0.78 / 0.24 rather than 0.84 / 0.28 because its double-barrel
+secondary rescales this profile to 0.82x frequency, dropping the body to ~37 Hz
+where the compensation applies its largest boost. At the Alyx values the single
+shot measured fine and the double regressed to 0.83.
+
+**The transient increase (0.34 → 0.60) is not measurable and is not claimed to
+be.** A 16 ms accent barely moves rms across a 574 ms effect. Its entire
+benefit is the part rms cannot see, and only hardware can settle it.
+
+### The pistol, and why the stagger had to come first — **RUNTIME**
+
+Reported from hardware as feeling good, so this is the one change in the pass
+made to something that was not complained about. The justification is that its
+transient sat at **470 Hz** — inside the region the rejected build proved this
+hardware cannot deliver. The accent was being paid for in headroom and arriving
+as almost nothing, leaving the weapon carried by its body alone.
+
+This was **not fixable before the layer-stagger existed**. Lowering the
+transient toward the body's 300 Hz onset made the two sum coherently instead of
+sitting clear, and the limiter went 1.00 → 0.94 for no gain — measured, and the
+reason an earlier pass abandoned the idea. With the body moved 10 ms back the
+collision disappears and the accent can be both lower and larger at once:
+
+| | before | after |
+|---|---|---|
+| transient | 470 Hz @ 0.34 | **380 Hz @ 0.45** |
+| peak | 0.92 | **0.87** |
+| rms | 0.151 | 0.152 |
+| limiter | 1.00 | 1.00 |
+
+Delivered output of the accent rises roughly **47%** (0.45 x 0.78 response
+against 0.34 x 0.70), while peak *falls*. No modulation was added: a pistol is
+one clean snap, and the shudder that suits the shotgun would read here as a
+mechanism rattling.
+
+Duration moves 186 → 196 ms, which pulls the pistol/grenade duration ratio from
+1.74x to 1.65x. Still clear of the 1.5x line, and it remains the thinnest
+margin in the Alyx set — those two are 1.06x apart on pitch and separate on
+duration alone.
+
+**Three effects, one mechanism.** The SMG, both shotguns and both pistols were
+all limited by layers striking together rather than by being loud. The rule is
+now stated once: *when an effect is limited but not loud, suspect layer
+collision before touching any amplitude.*
+
+### The break stage the pistol never had — **RUNTIME**
+
+Reported from hardware as wanting more punch. The cause was not a value being
+too small; it was a whole stage being deleted before it reached the hardware.
+
+Recoil is built as **break -> kick**: the trigger goes slack for a moment at
+priority 7, and when that expires the kick underneath is revealed. A guard
+exists to stop the break swallowing the kick — and it was a flat
+`kMinRevealMs = 140`, against reveals of 35 ms (pistol) and 50 ms (shotgun).
+Both failed it on **every shot** and had their break clamped to **zero**:
+
+| weapon | rate | reveal | break before | break now |
+|---|---|---|---|---|
+| pistol | 28 Hz | 35 ms | **0 ms** | **35 ms** |
+| shotgun | 12 Hz | 50 ms | **0 ms** | 30 ms |
+| grenade | 20 Hz | 110 ms | 10 ms | 40 ms |
+| smg | 22 Hz | 267 ms | 25 ms | 25 ms |
+
+So the two weapons fired most often never performed the two-stage recoil this
+file is built around, and nothing said so above debug level.
+
+It hurt the pistol a second way. With the break dropped, the full 70 ms of kick
+is exposed — about **two cycles** at 28 Hz — so it delivered a stutter where
+the recoil bench calls for one completed pulse and states that *for a punch,
+more cycles is the defect*. Restoring the break halves the exposed kick to
+35 ms: 0.98 of a cycle, one crisp snap.
+
+140 ms was inherited from the superseded "every effect needs >=1.5 cycles to be
+felt" rule that this document already records as wrong for an impulse. The
+floor is now **0.85 of one cycle of the kick's own rate**, which is what that
+section concluded instead. The HL2 adapter had already been given a saner flat
+55 ms; this generalises it rather than copying another magic number.
+
+Note the `--analyze` recoil ladder was reporting the DESIGNED reveal all along,
+not the delivered one, so it showed 35 ms for a pistol that was emitting 70 ms
+with no break. The ladder is now truthful because the runtime matches it.
+
+### Gravity-glove events went to the wrong hand — **STATIC**
+
+Reported from hardware: catching with the LEFT glove rumbled the RIGHT hand.
+Diagnosed without a further play session, by elimination.
+
+Two mechanisms produce that exact symptom. The first — a wrong
+`state.primaryIsLeft` — is **ruled out by the hardware reports themselves**: if
+that flag were wrong, `pollWeapon()` would be inspecting the empty hand, every
+weapon would resolve to `HANDS`, and all three guns would fall back to
+`DEFAULT_FIRE` and feel identical. Several rounds of distinct per-weapon
+feedback establish that weapon identity works, so the flag is right.
+
+That leaves the field read, and there is a concrete bug in it.
+
+```lua
+if v ~= nil then markStyle("table"); return tonumber(v) or fallback end
+```
+
+`hand_is_primary` is a FLAG, and a flag arrives as a Lua boolean.
+`tonumber(true)` is `nil`, so this returned the fallback `-1` for **both**
+`true` and `false` — `sideOfPrimaryFlag()` then matched neither `0` nor `1` and
+sent every lock, pull and catch to the primary hand, whichever glove was used.
+
+`v ~= nil` is what made it silent rather than recoverable: in Lua
+`false ~= nil` is **true**, so a false flag took the table branch and returned
+the fallback instead of falling through to the accessor path that might have
+answered.
+
+| `hand_is_primary` | before | after |
+|---|---|---|
+| `false` (off hand) | right — **wrong** | left |
+| `true` (primary) | right | right |
+| `0` / `1` | correct | correct |
+| absent | right | right — still warns once |
+
+The numeric rows already worked, which is itself the proof of type: had the
+engine delivered a number, this bug could not have occurred.
+
+**One root cause, two manifestations.** `is_primary_left` on
+`primary_hand_changed` is the same kind of flag read through the same helper,
+with fallback `0` and compared `== 1` — so `state.primaryIsLeft` could never be
+set to **true** even when the event did fire. The single fix repairs both. The
+remaining `fieldNum` callers (`entindex`, `health`, `damagebits`, `state`) are
+genuinely numeric and unaffected.
+
+Separately, `primaryIsLeft` is only ever written by `primary_hand_changed` and
+`single_controller_mode_changed`, which fire when the setting CHANGES and not
+on map load — so a player who chose their hand once in the menu never raises
+either. `pollWeapon()` now observes which hand actually holds a **firearm**
+(never a tool, melee or prop, any of which can sit in the off hand) and
+corrects the flag from that, accepting it only when exactly one hand qualifies.
+
+**Confidence: high, not certain.** The one residual possibility is the field
+being genuinely absent, which no amount of reading can distinguish from here —
+that path still emits `WARN:hand_is_primary absent` once per session, so a log
+settles it if the symptom survives.
+
+### Still not claimed
+
+Whether a 1.5x glide is perceptible *within* a single effect is still unproven.
+The 1.5x figure is the threshold for telling two SEPARATE effects apart. This
+round is defensible on force alone — nothing got quieter and two things got
+louder — but if the glides still cannot be felt as movement, the honest
+conclusion is that this hardware does not do intra-effect pitch travel and the
+parameter should be spent elsewhere.
+
+---
+
 ## Known gaps and the next things to check
 
 1. **Nothing in this revision has been felt on hardware.** Everything new is
@@ -845,3 +1143,82 @@ bullet 208/125, explosion 343/84, fire 562/183, toxic 671/97.
 
 Fire is the one worth noting: it has NO transient. Nothing struck you, and that
 absence is most of what makes it read as burning rather than as being hit.
+
+### Reading the manual overturned three assumptions - **STATIC**
+
+The official Half-Life 2 VR manual documents the mod's VR interaction model, and
+checking the adapter against it found three wrong claims. All three came from
+the same mistake - reasoning about a VR mod from the game it is a mod OF, which
+is the error this project warns about in other layers and then committed here.
+
+1. **"Half-Life 2 has no two-handed weapon grip."** Asserted in a comment.
+   HL2VR's Steam page advertises two-handed weapons as a headline feature and
+   the manual says almost every weapon supports it; the shotgun REQUIRES it,
+   because it cannot be pumped one-handed. Now modelled, including damped recoil
+   when braced - the game genuinely reduces recoil two-handed, and haptics that
+   contradict the game are worse than none.
+
+2. **"Half-Life 2 refills a magazine in a single step."** True of the flat game.
+   HL2VR's default is manual reloading with per-weapon physical steps: eject,
+   catch the falling magazine, retrieve a fresh one from over the shoulder,
+   insert it (differently per weapon), and chamber a round. The OFF hand does
+   the inserting and chambering, so those are felt in both hands - the
+   single-event version sent all of it to the primary hand, which was wrong
+   about the most basic fact of the gesture.
+
+3. **The shotgun pump was one waveform.** The manual: "pull in your off-hand
+   towards your primary hand, then move it back... you will hear a sound for
+   each part of the pump." Two separate player actions, arbitrarily far apart.
+   A single two-stage waveform fires the second half before the player performs
+   it.
+
+The reload family regrouped as a consequence. It had been one flat "reloading"
+family, which was correct while each weapon had one atomic reload and became
+wrong once the sequence was modelled: the steps of a pistol reload happen
+seconds apart and must not feel alike, while a pistol slide and a shotgun
+forestock are never part of the same gesture.
+
+78 signatures, no perceptual collisions.
+
+### The harness caught a state leak - **STATIC**
+
+`--verify` failed with "'brace' produced no waveform at all". Cause: the shotgun
+test forces two-handed (the game requires it), `HL2_TWO_HAND` only emits on a
+CHANGE, and the flag leaked between test cases - so by the time the brace case
+ran, the state was already true.
+
+Worth recording because it is the third time state leaking between test cases
+has produced a silently wrong measurement, after weapon identity and the
+mega-cannon swell. The fix is always the same: reset it in ResetForTest.
+
+A second, subtler one in the same pass: the unbrace case measured the BRACE,
+because it had to brace first to have anything to release. Both reported
+154 ms / 195 Hz - the same waveform twice - and the collision report is what
+made it visible.
+
+### Three bugs found by actually running it - **STATIC**
+
+The bHaptics listener and the plugin route were tested together against two
+simulators speaking their real protocols. Doing that found three things that
+static reading had not:
+
+1. **The bHaptics socket never opened when the plugin was present.** The main
+   loop only calls Connect() while the transport reports nothing connected, and
+   the merged transport reports connected as soon as ONE source is up. So
+   whichever route came up first permanently locked the other out. This would
+   have shipped as "the bHaptics route just does not work if you built the
+   plugin", and no amount of reading would have shown it.
+
+2. **Redirecting output to a file produced an empty file.** iostreams fully
+   buffer when stdout is not a console, so a session logged nothing until a
+   clean exit - and nothing at all if the window was closed or the process
+   killed. That is exactly the case a log is wanted for. Now line-flushed.
+
+3. **The live path refused to start without the game installed.** Both routes
+   are loopback sockets the game connects to, so they need it RUNNING, not
+   installed - the one thing testable before installing anything was the one
+   thing being refused. Now only install, uninstall and launch require the path.
+
+Verified afterwards: `Event sources: plugin + bhaptics`, with a metal impact
+carrying mass 40 and spin 700 from the plugin and the weapon vocabulary arriving
+from the bHaptics stream, in the same session.

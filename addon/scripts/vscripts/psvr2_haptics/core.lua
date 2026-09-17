@@ -79,9 +79,24 @@ local function markStyle(style)
     end
 end
 
+-- A FLAG field arrives as a Lua boolean, and tonumber(true) is nil.
+--
+-- This is not hypothetical: hand_is_primary is the flag that decides which
+-- glove every gravity-glove event belongs to. Written as
+-- `tonumber(v) or fallback` it returned the fallback for BOTH true and false,
+-- so sideOfPrimaryFlag() saw -1 either way and sent every lock, pull and catch
+-- to the primary hand - catching in the left rumbled the right, all session.
+--
+-- The `v ~= nil` guard is what makes it silent rather than recoverable: in Lua
+-- `false ~= nil` is TRUE, so a false flag takes the table branch and returns
+-- the fallback instead of falling through to the accessor path that could have
+-- answered. Booleans are therefore converted before tonumber() ever sees them.
 local function fieldNum(e, key, fallback)
     if e == nil then return fallback end
     local v = e[key]
+    if type(v) == "boolean" then markStyle("table"); return v and 1 or 0 end
+    if v == "true" then markStyle("table"); return 1 end
+    if v == "false" then markStyle("table"); return 0 end
     if v ~= nil then markStyle("table"); return tonumber(v) or fallback end
     local ok, got = pcall(function() return e:GetInt(key) end)
     if ok and got ~= nil then markStyle("accessor"); return got end
@@ -328,7 +343,55 @@ local function weaponUnder(ent, depth)
     return nil
 end
 
+-- Which hand is PRIMARY, observed instead of assumed.
+--
+-- state.primaryIsLeft is written ONLY by primary_hand_changed and
+-- single_controller_mode_changed, and those fire when the setting CHANGES -
+-- not on map load. A player who picked their primary hand once, in the menu,
+-- before ever loading a map never raises either event, so the flag sits at its
+-- default (right) for the whole session with nothing to correct it.
+--
+-- For a left-handed player that mirrors every gravity-glove event to the wrong
+-- hand: catching in the left rumbles the right. It also breaks weapon identity
+-- outright, because pollWeapon() only ever inspected the hand it already
+-- believed was primary - so it watched the empty hand and reported HANDS
+-- forever.
+--
+-- Alyx puts the weapon in the primary hand, so what is HELD is the answer, and
+-- it needs no event to arrive. Only accepted when exactly one hand holds a
+-- classifiable weapon: both hands or neither is ambiguous and leaves the flag
+-- alone, so an off-hand prop cannot flip it.
+local function observedWeaponHand()
+    local found = nil
+    for handId = 0, 1 do
+        local att = handAttachment(handId)
+        if att ~= nil then
+            local cls = safe(function() return att:GetClassname() end, "")
+            local mdl = safe(function() return att:GetModelName() end, "")
+            local w = classify(cls) or classify(mdl)
+            -- FIREARMS only. TOOL covers the multitool and the radio and MELEE
+            -- the crowbar, any of which can end up in the off hand - treating
+            -- those as proof of primacy would flip the flag the wrong way the
+            -- moment the gun was holstered.
+            if w == "PISTOL" or w == "SHOTGUN" or w == "SMG" then
+                if found ~= nil then return nil end
+                found = handId
+            end
+        end
+    end
+    return found
+end
+
 local function pollWeapon()
+    -- Correct the primary-hand flag from what is actually held, BEFORE using it.
+    local held = observedWeaponHand()
+    if held ~= nil then
+        local isLeft = (held == 0)
+        if isLeft ~= state.primaryIsLeft then
+            state.primaryIsLeft = isLeft
+            emit("PRIMARY_HAND:" .. primarySide())
+        end
+    end
     local att = handAttachment(state.primaryIsLeft and 0 or 1)
     if att == nil then
         setWeapon("HANDS", "poll")

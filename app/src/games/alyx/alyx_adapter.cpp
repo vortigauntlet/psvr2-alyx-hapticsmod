@@ -225,6 +225,14 @@ TriggerCommand WeaponBase(const std::string& w) {
 //
 // ms = 0 means no load, the right answer for anything that is not a firearm
 // going off in the hand.
+// The vibration rate a recoil command carries, whichever vibration mode it
+// uses. Both are in play: the pistol is Vibration, the SMG is MultiVibration.
+int RecoilRate(const TriggerCommand& c) {
+    if (c.mode == kTriggerVibration) return c.data.vibration.frequency;
+    if (c.mode == kTriggerMultiPositionVibration) return c.data.multiVibration.frequency;
+    return 0;
+}
+
 TriggerCommand RecoilKick(const std::string& w, int& ms) {
     // THE BREAK - the resistance vanishing, not more of it.
     //
@@ -285,7 +293,30 @@ TriggerCommand RecoilKick(const std::string& w, int& ms) {
 // A check that the kick merely outlasts the load is not enough and was exactly
 // the check that passed on the broken build. What matters is that it outlasts
 // it by enough cycles to be felt.
-constexpr int kMinRevealMs = 140;
+// The reveal floor is ONE PULSE of the kick, not a fixed number of ms.
+//
+// This was 140 ms flat, and that constant was quietly deleting the break stage
+// from most of the game. The pistol reveals for 35 ms and the shotgun for 50,
+// so both failed the test on every shot and had their break clamped to ZERO -
+// meaning the two weapons fired most often never performed the two-stage
+// recoil this file is built around, and nothing said so above debug level.
+//
+// It also made the pistol WORSE than the design intended in a second way. With
+// the break dropped, its whole 70 ms of kick is exposed - about two cycles at
+// 28 Hz - so it delivered a stutter where the recoil bench specifically calls
+// for one completed pulse and says that for a punch, more cycles is the defect.
+//
+// 140 ms was inherited from the superseded "every effect needs >=1.5 cycles to
+// be felt" rule, which VERIFIED.md already records as wrong for an impulse.
+// Scaling with the rate is what that section concluded instead: 0.85 of a
+// cycle, so the reveal is long enough to complete a pulse and no longer.
+// (The HL2 adapter had already been given a saner flat 55 ms; this generalises
+// it rather than copying another magic number.)
+int MinRevealMs(const TriggerCommand& kick) {
+    const int rate = RecoilRate(kick);
+    if (rate <= 0) return 55;
+    return std::clamp(850 / rate, 20, 140);
+}
 
 // Recoil vibration never runs at full drive.
 //
@@ -562,12 +593,13 @@ void AlyxAdapter::Fire(const std::string& w, bool twoHand, int roundsLeft) {
     // trusting the two tables to stay in step. Shipping a 40 ms reveal once
     // already cost a full test round.
     const int reveal = ms - loadMs;
-    if (loadMs > 0 && reveal < kMinRevealMs) {
+    const int minReveal = MinRevealMs(kick);
+    if (loadMs > 0 && reveal < minReveal) {
         if (cfg_.debug) {
             std::cout << "[Trigger] " << w << " reveal is only " << reveal
                       << " ms; clamping the load so the kick can be felt\n";
         }
-        loadMs = std::max(0, ms - kMinRevealMs);
+        loadMs = std::max(0, ms - minReveal);
     }
 
     if (loadMs > 0) {
