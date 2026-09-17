@@ -40,6 +40,7 @@ set(CORE_SOURCES
     src/core/hmd.cpp
     src/core/impact.cpp
     src/core/materials.cpp
+    src/core/multi_transport.cpp
     src/core/profiles.cpp
     src/core/transport.cpp
     src/core/triggers.cpp

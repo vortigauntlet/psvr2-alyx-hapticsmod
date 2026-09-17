@@ -23,6 +23,9 @@ void Transport::WaitForData(int timeoutMs) {
 }
 
 bool LogTail::Connect() {
+    // An empty path means the game folder is unknown. Not an error - the
+    // socket routes do not need it - so this simply never connects.
+    if (path_.empty()) return false;
     if (file_.is_open()) return true;
     file_.open(path_, std::ios::binary);
     if (!file_) return false;

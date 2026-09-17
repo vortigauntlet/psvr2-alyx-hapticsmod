@@ -174,6 +174,34 @@ controllers cannot, and the hand feels the same jolt either way. Also dropped:
 Taking all of them would have added twenty effects that measure the same, which
 is the exact failure this project has now found four times.
 
+### Both routes run at once
+
+Neither supersedes the other, so the middleware accepts both simultaneously and
+merges their streams:
+
+| | plugin | bHaptics stream |
+|---|---|---|
+| which weapon fired | yes | yes |
+| rounds remaining | yes | no |
+| mass / surface material / spin | **yes** | no |
+| damage TYPE (fire, shock, toxic) | no | **yes** |
+| manual reload STEPS | no | probably |
+| which hand | no | probably (Left/Right suffixes) |
+
+`Event sources: plugin + bhaptics` in the output tells you what is live, and it
+re-announces if one joins or drops mid-session.
+
+Duplicate suppression is deliberately **not** done. If both routes report the
+same shot that is a real configuration to see and fix, not something to paper
+over silently.
+
+### You do not need the game installed to listen
+
+Both live routes are loopback **sockets that the game connects to**, so
+listening needs Half-Life 2 VR *running*, not installed and not findable on this
+disk. Only the `console.log` fallback needs the install folder, so only that is
+lost when the folder is missing. The middleware says so and carries on.
+
 ### Proven without the game
 
 The listener, the JSON scan, the key mapper and the adapter were tested end to
@@ -268,6 +296,83 @@ the measurement is what decided its shape. The intuitive "soft low thud" put it
 at 145 Hz, inside the discrimination threshold of both rubber and organic; loose
 ground is really a long granular *hiss*, which is a free cell and a better
 description.
+
+---
+
+## What Half-Life 2 VR actually does, and what I got wrong
+
+The [official manual](https://halflife2vr.com/manual/) documents HL2VR's VR
+interaction model in detail, and reading it properly overturned three
+assumptions this adapter had been built on. All three came from the same
+mistake: **reasoning about a VR mod from the game it is a mod of.**
+
+### 1. Two-handed weapons — I had asserted these did not exist
+
+The adapter said, in a comment: *"Half-Life 2 has no two-handed weapon grip, so
+the support hand is always free."* True of flat Half-Life 2. False of HL2VR,
+whose Steam page advertises "two-handed weapons" as a headline feature and whose
+manual says "almost all weapons can be held with both hands":
+
+| weapon | two-handed behaviour |
+|---|---|
+| Pistol | optional, slightly reduced recoil |
+| SMG, Pulse Rifle | **expected**; recoil reduced significantly |
+| Shotgun | **required** — you cannot pump it otherwise |
+| Revolver, Gravity Gun, RPG | cosmetic only |
+
+Now modelled: the support hand takes a brace profile (firmer for the weapons
+that expect two hands), a braced shot sends a duller component to that hand, and
+**the trigger kick is damped when braced** — because the game really does reduce
+recoil, and haptics that contradict the game are worse than none.
+
+### 2. Reloading is a sequence of physical actions, not a button press
+
+The adapter rendered reloading as one event with a multi-stage waveform, on the
+reasoning that "Half-Life 2 refills a magazine in a single step". HL2VR's default
+is **manual reload**, and the manual sets out the steps per weapon:
+
+> eject the magazine (it falls, and you may **catch** it) → reach over your
+> shoulder with the **off hand** for a fresh one → insert it, differently per
+> weapon → and for a weapon run completely dry, chamber a round.
+
+* Pistol & SMG — insert into the magazine well
+* Revolver — tilt back to empty, insert clip, **flick** to close the chamber
+* Pulse Rifle — snap the space-magazine onto the well
+* Shotgun — insert shells one at a time into the loading port
+* Crossbow — nock a bolt; it draws itself back
+* RPG — slide the rocket into the launcher
+* Chambering — pistol **slide**, SMG **charging handle**, shotgun **forestock**
+
+**Which hand matters, and is the main reason these are separate events.** The
+off-hand does the inserting and the chambering while the primary hand holds the
+weapon, so an insert is felt in *both* hands — one pushing, one resisting — and
+a magazine retrieved from the shoulder is felt only in the off-hand. Sending all
+of it to the primary hand, as the single-event version did, was wrong about the
+most basic fact of the gesture.
+
+`HL2_RELOAD` survives, and now means **Quick Reload** — the game's alternative
+one-shot mode, which genuinely is a single event.
+
+### 3. The shotgun pump is two actions, not one
+
+> "pull in your off-hand towards your primary hand, then move it back. If both
+> parts of the pump aren't complete, the weapon won't fire. (You will hear a
+> sound for each part of the pump.)"
+
+Two things the player does, however far apart they choose — so two events, both
+on the off-hand. A single two-stage waveform would have fired the second half
+before the player performed it.
+
+### Also modelled from the manual
+
+* **Melee** — "damage scales based on your swing's distance and speed", with a
+  minimum on both and a cooldown. Impact energy scales with swing speed.
+  Swinging props does no damage, but a swung prop still physically collides, so
+  held-object impacts stay.
+* **Grenades** — hold the trigger to arm, physical throw, release to throw. Two
+  events: rising tension that waits, then the release that resolves it.
+* **Ladders** — immersive grip climbing, per hand.
+* **Both hands grab independently** via Grip.
 
 ---
 
@@ -475,29 +580,34 @@ each is to need work:
    the plugin becomes the only route.
 2. **What are the real key names?** The scan prints them. Send me the list and
    the substring rules become exact matches.
-3. **Does Half-Life 2 VR load server plugins at all?** Only matters for route 2.
+3. **What are HL2VR's own convars?** Launch with `-vrdev` to unlock the
+   developer menu, then run `cvarlist` in the console. HL2VR prefixes its own
+   with `hlvr_` (e.g. `hlvr_hud_on_mirror`). Anything `hlvr_bhaptics*` would
+   confirm route 1 outright, and the list may expose other state worth reading.
+4. **Does Half-Life 2 VR load server plugins at all?** Only matters for route 2.
    `plugin_load addons/psvr2_haptics_plugin` is the fastest test.
-4. **Do the seven network properties resolve?** The load message prints
+5. **Do the seven network properties resolve?** The load message prints
    `resolved N/7`; anything less names the field that failed.
-5. **Is entity index 1 the player?** True for stock singleplayer Source.
-6. **Does `physgun_pickup` fire for HL2VR's VR grab?** HL2VR replaced the flat
+6. **Is entity index 1 the player?** True for stock singleplayer Source.
+7. **Does `physgun_pickup` fire for HL2VR's VR grab?** HL2VR replaced the flat
    game's pickup interaction. If its grab does not route through
    `Pickup_OnPhysGunPickup`, the entire gravity-gun family goes quiet and needs
    another signal. This is the largest single risk to the feature set.
-7. **Are the two impact thresholds anywhere near right?** They are starting
+8. **Are the two impact thresholds anywhere near right?** They are starting
    points, not measurements. Set `psvr2_haptics_debug 1`, carry and swing a
    crate, a barrel and a can, then read the candidates back with `--impacts`.
-8. **Does the melee trace agree with what the player actually hit?** It runs
+9. **Does the melee trace agree with what the player actually hit?** It runs
    from the server's idea of the eye and view direction; in VR the crowbar is
    swung by a *hand* this plugin cannot see. Fallbacks are documented in the
    plugin README.
-9. **Does the shotgun increment its clip one shell at a time in HL2VR?** It does
+10. **Does the shotgun increment its clip one shell at a time in HL2VR?** It does
    in stock Half-Life 2; HL2VR may have changed the reload.
-10. **Which hand is which.** Half-Life 2 VR is a two-handed VR mod, but nothing
-   this plugin can read says which hand holds the weapon. Everything currently
-   goes to the configured primary hand. If HL2VR exposes hand state in any
+11. **Which hand is which.** The game has a Dominant Hand setting and swaps
+   every control with it, so `PRIMARY_HAND` maps to a real thing - but nothing
+   the plugin can read reports it, and nothing reports which hand grabbed what.
+   Everything resolves against the configured handedness. If HL2VR exposes hand state in any
    network table, the `hand=` field is already in the wire format and the
    adapter already honours it.
-11. **Then, and only then, the feel.** Every number in the tables above is a
+12. **Then, and only then, the feel.** Every number in the tables above is a
    measurement of the waveform, not of the sensation. `--analyze` proves two
    effects are *different*; only hands prove they are *right*.

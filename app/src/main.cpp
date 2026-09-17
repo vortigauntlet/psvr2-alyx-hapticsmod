@@ -36,6 +36,7 @@
 #include "core/capi.h"
 #include "core/bhaptics_listener.h"
 #include "core/config.h"
+#include "core/multi_transport.h"
 #include "core/events.h"
 #include "core/haptics.h"
 #include "core/hmd.h"
@@ -1828,6 +1829,16 @@ std::unique_ptr<IGameAdapter> MakeAdapter(const Config& cfg, Mixer& mixer,
 
 int Main(int argc, char** argv) {
     SetConsoleOutputCP(CP_UTF8);
+    // Flush every line.
+    //
+    // This process runs for a whole play session and its output is the only
+    // record of what happened. Left to the default, iostreams fully buffer when
+    // stdout is a pipe or a file rather than a console - so redirecting to a
+    // log produced an EMPTY file until a clean exit, and nothing at all if the
+    // window was closed or the process killed. That is precisely the case a log
+    // is wanted for.
+    std::cout << std::unitbuf;
+    std::cerr << std::unitbuf;
     std::signal(SIGINT, OnSignal);
     std::signal(SIGTERM, OnSignal);
 
@@ -2004,11 +2015,32 @@ int Main(int argc, char** argv) {
         && !doHmdSweep && !doHmdTest && !doVerify && !doBhapticsScan) {
         std::string err;
         if (!cfg.Validate(err)) {
-            std::cerr << "\n" << err << "\n";
-            return 3;
+            // For Half-Life 2 VR, a missing game folder is only fatal when
+            // something actually needs it.
+            //
+            // Both of its live routes are loopback SOCKETS - the game connects
+            // to us - so listening needs the game RUNNING, not installed, and
+            // not findable on this disk at all. Refusing to start without a
+            // path made the one thing a user can test before installing
+            // anything impossible to test, which is exactly backwards.
+            //
+            // Only the console.log fallback needs the folder, so only that is
+            // lost.
+            const bool needsPath = doInstallOnly || doUninstall || doLaunch;
+            if (!cfg.isHl2vr() || needsPath) {
+                std::cerr << "\n" << err << "\n";
+                return 3;
+            }
+            std::cout << "Half-Life 2 VR: not found on this machine.\n"
+                         "  That is fine for listening: both live routes are local"
+                         " sockets\n"
+                         "  the game connects to, so it only has to be RUNNING."
+                         " Only the\n"
+                         "  console.log fallback needs the install folder.\n";
+        } else {
+            std::cout << (cfg.isHl2vr() ? "Half-Life 2 VR: " : "Half-Life: Alyx: ")
+                      << cfg.gamePath() << "\n";
         }
-        std::cout << (cfg.isHl2vr() ? "Half-Life 2 VR: " : "Half-Life: Alyx: ")
-                  << cfg.gamePath() << "\n";
     }
 
     // ---- game-side deployment -------------------------------------------
@@ -2301,14 +2333,23 @@ int Main(int argc, char** argv) {
     // needs nothing installed to do it. Tried first for that reason: it is the
     // only route that works before the server plugin has been built.
     BhapticsListener bhaptics;
-    LogTail logtail(cfg.isHl2vr() ? cfg.hl2vrConsoleLogPath()
-                                  : cfg.consoleLogPath());
-    Transport& fast = cfg.isHl2vr() ? static_cast<Transport&>(udp)
+    // Empty when the game folder is unknown; LogTail then simply never
+    // connects, which is the correct behaviour rather than an error.
+    LogTail logtail(cfg.isHl2vr()
+                        ? (cfg.hl2vrPath.empty() ? std::string()
+                                                 : cfg.hl2vrConsoleLogPath())
+                        : cfg.consoleLogPath());
+    // Half-Life 2 VR runs BOTH of its routes at once, because neither
+    // supersedes the other: the bHaptics stream knows what happened by the
+    // developers' own name for it, and the plugin knows the physics behind it.
+    // Picking one would throw away what the other knows.
+    MultiTransport merged;
+    if (cfg.isHl2vr()) {
+        merged.Add(&udp, "plugin");
+        merged.Add(&bhaptics, "bhaptics");
+    }
+    Transport& fast = cfg.isHl2vr() ? static_cast<Transport&>(merged)
                                     : static_cast<Transport&>(netcon);
-    // A third candidate, for Half-Life 2 VR only. The plugin carries more
-    // information when it exists, so it stays the preferred source; this is
-    // what makes the integration work at all when it does not.
-    Transport* extra = cfg.isHl2vr() ? static_cast<Transport*>(&bhaptics) : nullptr;
     Transport* transport = nullptr;
     bool announcedTransport = false;
 
@@ -2338,12 +2379,26 @@ int Main(int argc, char** argv) {
 
     while (g_running) {
         const auto now = std::chrono::steady_clock::now();
+
+        // A merged stream is offered the chance to connect EVERY iteration,
+        // not only while it has nothing.
+        //
+        // Its sources come up at different moments - the bHaptics socket the
+        // instant the game starts, the plugin only once a level has loaded -
+        // and the reconnect logic below stops as soon as the transport reports
+        // Connected(). With one source live that returns true, so the other
+        // never got a chance and silently stayed dark for the whole session.
+        // Found by running both against the middleware at once; it would have
+        // shipped as "the bHaptics route just doesn't work when the plugin is
+        // installed".
+        //
+        // Cheap: every source returns immediately once it is connected.
+        if (cfg.isHl2vr()) merged.Connect();
+
         // Reconnect logic: try the fast path first each time we have nothing.
         if (transport == nullptr || !transport->Connected()) {
             if (fast.Connect()) {
                 transport = &fast;
-            } else if (extra != nullptr && extra->Connect()) {
-                transport = extra;
             } else if (logtail.Connect()) {
                 transport = &logtail;
             } else {
@@ -2427,6 +2482,15 @@ int Main(int argc, char** argv) {
             // what lets an old session still exercise new profiles.
             recorder.Write(event, param);
             router.Handle(event, param);
+        }
+
+        // A merged stream can gain or lose a source mid-session - the plugin
+        // only comes up once a level has loaded, and the game may be restarted
+        // while this keeps running. Say so when it changes, because "which
+        // routes are live" is the first thing to check when something is
+        // missing.
+        if (cfg.isHl2vr() && merged.TakeChanged() && announcedTransport) {
+            std::cout << "Event sources: " << merged.name() << "\n";
         }
 
         triggers.Tick();

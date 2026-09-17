@@ -155,6 +155,12 @@ private:
     std::string weapon_ = hl2::kHands;
     bool menuOpen_ = false;
 
+    // The off-hand on the weapon. Half-Life 2 VR advertises two-handed weapons
+    // as a headline feature and the manual says almost every weapon supports
+    // it, so this is a live state rather than the constant false an earlier
+    // revision assumed from flat Half-Life 2.
+    bool twoHand_ = false;
+
     // The supercharged gravity gun from Nova Prospekt onward. A real state
     // change in the game, read by the plugin from the physcannon_mega_enabled
     // convar, and worth representing because the weapon genuinely becomes a

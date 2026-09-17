@@ -102,6 +102,32 @@ Everything else is therefore derived from polled state:
 | `HL2_DAMAGE` | health + armour delta | High; the amount is a delta, not a reported figure |
 | `HL2_MEGA` | `physcannon_mega_enabled` | High — this is how the game decides |
 
+### What this plugin CANNOT see, and the bHaptics route can
+
+Half-Life 2 VR's manual reload is a sequence of physical VR actions - eject the
+magazine, catch it, reach over your shoulder, insert it, chamber a round - and
+the shotgun pump is two distinct off-hand motions. **None of that is visible
+here.** Those are HL2VR's own VR interaction state, which lives in its
+non-public code and appears in no network table this plugin can read.
+
+What the plugin sees is the CONSEQUENCE: `m_iClip1` changing. From that it can
+say "a reload completed" and, for the shotgun, "one more shell went in". It
+cannot say which hand did it or which step just happened.
+
+So the two routes carry genuinely different information:
+
+| | plugin | bHaptics stream |
+|---|---|---|
+| which weapon fired | yes | yes |
+| rounds remaining | yes | no |
+| mass / surface / spin | **yes** | no |
+| damage TYPE (fire, shock, toxic) | no | **yes** |
+| manual reload STEPS | no | **probably** |
+| which hand | no | **probably** (Left/Right suffixes) |
+
+Neither supersedes the other, and running both is better than either. That is
+why the middleware accepts them simultaneously rather than picking one.
+
 ### The melee trace is the weakest thing here
 
 `HL2_MELEE_HIT` re-runs the crowbar's own trace (75 units forward,

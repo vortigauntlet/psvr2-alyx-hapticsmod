@@ -63,15 +63,46 @@ const std::vector<BhapticsRule>& BhapticsRules() {
         {"crowbar",     "HL2_MELEE_HIT", "melee - the crowbar names itself"},
         {"stunstick",   "HL2_MELEE_HIT", "melee - the stunstick"},
 
-        // --- reload mechanisms, before the weapon names they contain -------
-        {"reload",      "HL2_RELOAD",    "any reload"},
-        {"clipin",      "HL2_RELOAD",    "a magazine seating"},
-        {"clipout",     "HL2_RELOAD",    "a magazine dropping"},
-        {"clipinserted","HL2_RELOAD",    "a magazine seating, bHaptics spelling"},
-        {"magazine",    "HL2_RELOAD",    "a magazine"},
-        {"chamber",     "HL2_RELOAD",    "a round chambering"},
+        // --- manual reload STEPS, before the weapon names they contain -----
+        //
+        // Half-Life 2 VR reloads as a sequence of physical actions rather than
+        // one press, so these route to the individual steps and not to the
+        // atomic HL2_RELOAD. If the game turns out to fire only one pattern for
+        // a whole reload, the generic rules further down still catch it.
+        {"ejectmag",    "HL2_MAG_EJECT", "the magazine being ejected"},
+        {"magazineeject","HL2_MAG_EJECT","the magazine being ejected"},
+        {"magout",      "HL2_MAG_EJECT", "the magazine leaving"},
+        {"clipout",     "HL2_MAG_EJECT", "the magazine leaving"},
+        {"magcatch",    "HL2_MAG_CATCH", "catching the falling magazine"},
+        {"catchmag",    "HL2_MAG_CATCH", "catching the falling magazine"},
+        {"backpack",    "HL2_MAG_RETRIEVE", "reaching over the shoulder"},
+        {"shoulder",    "HL2_MAG_RETRIEVE", "reaching over the shoulder"},
+        {"retrieve",    "HL2_MAG_RETRIEVE", "taking something from storage"},
+        {"clipinserted","HL2_MAG_INSERT","a magazine seating, bHaptics spelling"},
+        {"maginsert",   "HL2_MAG_INSERT","a magazine seating"},
+        {"clipin",      "HL2_MAG_INSERT","a magazine seating"},
+        {"insertclip",  "HL2_MAG_INSERT","a magazine seating"},
+        {"magazine",    "HL2_MAG_INSERT","a magazine, otherwise unqualified"},
+        {"charginghandle","HL2_CHAMBER", "the SMG charging handle"},
+        {"chamber",     "HL2_CHAMBER",   "a round chambering"},
+        {"slide",       "HL2_CHAMBER",   "the pistol slide"},
+        {"cylinder",    "HL2_CYLINDER",  "the revolver cylinder"},
+        {"nock",        "HL2_BOLT_NOCK", "nocking a crossbow bolt"},
+        {"bolt",        "HL2_BOLT_NOCK", "a crossbow bolt"},
+        {"loadrocket",  "HL2_ROCKET_LOAD", "sliding a rocket in"},
+        {"rocketload",  "HL2_ROCKET_LOAD", "sliding a rocket in"},
         {"shell",       "HL2_SHELL",     "a shotgun shell"},
         {"pump",        "HL2_PUMP",      "a pump action"},
+        {"forestock",   "HL2_PUMP",      "the shotgun forestock"},
+        // Generic, and last of the reload block: a game that fires one pattern
+        // for the whole reload still lands somewhere sensible.
+        {"reload",      "HL2_RELOAD",    "a whole reload in one event"},
+
+        // --- other physical interactions the manual documents ---------------
+        {"twohand",     "HL2_TWO_HAND",  "the off hand coming onto the weapon"},
+        {"secondhand",  "HL2_TWO_HAND",  "the off hand coming onto the weapon"},
+        {"offhand",     "HL2_TWO_HAND",  "the off hand coming onto the weapon"},
+        {"ladder",      "HL2_LADDER",    "a hand closing on a rung"},
 
         // --- firing ---------------------------------------------------------
         {"shotgun",     "HL2_FIRE",      "the shotgun firing"},
@@ -249,6 +280,55 @@ BhapticsMapping MapBhapticsKey(const std::string& key) {
         if (std::string(rule.event) == "HL2_RELOAD") {
             out.event = "HL2_RELOAD";
             out.params = "";
+            return out;
+        }
+
+        if (std::string(rule.event) == "HL2_PUMP") {
+            // The pump is two separate actions in this game. If the key says
+            // which half it is, route it; if it does not, fall back to the
+            // combined single-event pump rather than guessing a half.
+            if (Has(k, "back") || Has(k, "pull") || Has(k, "open")) {
+                out.event = "HL2_PUMP_BACK";
+            } else if (Has(k, "fwd") || Has(k, "forward") || Has(k, "close") ||
+                       Has(k, "return")) {
+                out.event = "HL2_PUMP_FWD";
+            } else {
+                out.event = "HL2_PUMP";
+            }
+            return out;
+        }
+
+        if (std::string(rule.event) == "HL2_CYLINDER") {
+            out.event = "HL2_CYLINDER";
+            out.params = (Has(k, "close") || Has(k, "shut") || Has(k, "flick"))
+                             ? "close" : "open";
+            return out;
+        }
+
+        if (std::string(rule.event) == "HL2_TWO_HAND") {
+            // Only meaningful if the key says which way. A pattern named just
+            // "TwoHand" cannot say whether the hand arrived or left, and
+            // guessing would toggle the brace at the wrong moment.
+            if (Has(k, "on") || Has(k, "grab") || Has(k, "grip")) {
+                out.params = "1";
+            } else if (Has(k, "off") || Has(k, "release") || Has(k, "let")) {
+                out.params = "0";
+            } else {
+                out.event.clear();
+                out.rule = "two-handing, but not which way - not guessed";
+                return out;
+            }
+            out.event = "HL2_TWO_HAND";
+            return out;
+        }
+
+        if (std::string(rule.event) == "HL2_MAG_CATCH" ||
+            std::string(rule.event) == "HL2_MAG_RETRIEVE" ||
+            std::string(rule.event) == "HL2_LADDER") {
+            // Hand, where the key names one - bHaptics' convention is a
+            // Left/Right suffix. Empty resolves to the configured primary.
+            out.event = rule.event;
+            out.params = Has(k, "left") ? "left" : (Has(k, "right") ? "right" : "");
             return out;
         }
 

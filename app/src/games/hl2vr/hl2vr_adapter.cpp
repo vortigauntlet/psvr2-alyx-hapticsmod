@@ -333,10 +333,30 @@ void Hl2vrAdapter::RefreshWeaponState() {
                       (weapon_ == hl2::kGravGun && megaCannon_) ? MegaCannonBase()
                                                                 : WeaponBase(weapon_),
                       weapon_);
-    // Half-Life 2 has no two-handed weapon grip, so the support hand is always
-    // free. Saying so explicitly stops a stale brace profile surviving a switch
-    // from a game that does have one.
-    triggers_.SetBase(Other(), trig::Off(), "free");
+
+    // The support hand, when it is on the weapon.
+    //
+    // An earlier revision of this file asserted that "Half-Life 2 has no
+    // two-handed weapon grip". That was simply wrong, and it is worth recording
+    // how: the claim was reasoned from FLAT Half-Life 2, where it is true, and
+    // never checked against Half-Life 2 VR, where the official manual says
+    // "almost all weapons can be held with both hands" and the Steam page
+    // advertises two-handed weapons as a headline feature.
+    //
+    // Reasoning about a VR mod from the game it is a mod OF is exactly the
+    // mistake this project keeps warning about in other layers.
+    //
+    // The brace is firmer for weapons the manual says EXPECT two hands - the
+    // SMG and the pulse rifle - than for those where it is optional or purely
+    // cosmetic, because the amount of weapon you are actually supporting
+    // differs.
+    if (twoHand_) {
+        const bool expectsTwo = (weapon_ == hl2::kSmg || weapon_ == hl2::kAr2 ||
+                                 weapon_ == hl2::kShotgun);
+        triggers_.SetBase(Other(), trig::Feedback(3, expectsTwo ? 3 : 2), "brace");
+    } else {
+        triggers_.SetBase(Other(), trig::Off(), "free");
+    }
 }
 
 void Hl2vrAdapter::ResetForTest() {
@@ -350,6 +370,11 @@ void Hl2vrAdapter::ResetForTest() {
     // that emits leaks into the NEXT case's measurement. carry-grab measured
     // 670 ms of somebody else's waveform before this was found.
     megaCannon_ = false;
+    // The shotgun forces this true because the game requires two hands to pump
+    // it, so without clearing it here the brace case measured nothing: the
+    // shotgun test had already braced, and TWO_HAND only emits on a CHANGE.
+    // Found by --verify, not by feel.
+    twoHand_ = false;
     vary_.Reseed();
 }
 
@@ -357,6 +382,29 @@ void Hl2vrAdapter::Fire(const std::string& w, int roundsLeft, bool secondary) {
     int loadMs = BreakMs(w);
     int ms = 0;
     TriggerCommand kick = FireOverlay(w, ms);
+
+    // Bracing genuinely reduces recoil in Half-Life 2 VR - the manual is
+    // explicit that the pistol gains "slightly reduced recoil" two-handed and
+    // that the SMG and pulse rifle are "reduced significantly". That is a real
+    // gameplay difference the player can feel in their aim, so the trigger has
+    // to reflect it or the haptics are contradicting the game.
+    //
+    // Applied to DRIVE only, not to rate or duration: the weapon still kicks
+    // with its own character, it simply kicks less hard. Scaling the length
+    // would change which weapon it reads as.
+    if (twoHand_) {
+        const bool expectsTwo = (w == hl2::kSmg || w == hl2::kAr2);
+        const float scale = expectsTwo ? 0.62f : 0.82f;
+        auto damp = [scale](uint8_t v) {
+            return static_cast<uint8_t>(std::max(1, static_cast<int>(
+                std::lround(static_cast<float>(v) * scale))));
+        };
+        if (kick.mode == kTriggerVibration) {
+            kick.data.vibration.amplitude = damp(kick.data.vibration.amplitude);
+        } else if (kick.mode == kTriggerMultiPositionVibration) {
+            for (auto& a : kick.data.multiVibration.amplitude) a = damp(a);
+        }
+    }
 
     // Clamp the kick's drive, whatever the table asked for. Full drive
     // measurably pushes back WORSE than 6-7 once the trigger is bottomed out,
@@ -417,6 +465,22 @@ void Hl2vrAdapter::Fire(const std::string& w, int roundsLeft, bool secondary) {
     // a shot read as a shot rather than as mush.
     for (auto& voice : v) voice.group = kGroupWeaponFire;
     Emit(primary_, std::move(v), "FIRE");
+
+    // The support hand feels the FRAME, not the action: duller and quieter.
+    //
+    // Only when the off-hand is actually on the weapon, which in this game is
+    // a deliberate act the player performs rather than a permanent state.
+    if (twoHand_) {
+        std::vector<Voice> support;
+        const bool heavy = (w == hl2::kShotgun || w == hl2::kRpg ||
+                            w == hl2::kMagnum);
+        support.push_back(Body(heavy ? 100.0f : 170.0f,
+                               heavy ? 60.0f : 140.0f,
+                               heavy ? 0.42f : 0.26f,
+                               heavy ? 220.0f : 110.0f,
+                               heavy ? 130.0f : 55.0f));
+        Emit(Other(), std::move(support), "FIRE");
+    }
 
     // Running dry.
     //
@@ -627,7 +691,34 @@ void Hl2vrAdapter::Handle(const std::string& event, const std::string& param) {
         if (token != weapon_ && !token.empty()) SetWeapon(token);
         const int roundsLeft = FieldInt(parts, 1, -1);
         const bool secondary = arg(2) == "2";
+        // A shot may carry the brace state directly. The shotgun REQUIRES two
+        // hands in this game - it cannot be pumped otherwise - so a shotgun
+        // shot is braced whether or not anything said so.
+        if (arg(3) == "2H") twoHand_ = true;
+        else if (arg(3) == "1H") twoHand_ = false;
+        if (weapon_ == hl2::kShotgun) twoHand_ = true;
         Fire(weapon_, roundsLeft, secondary);
+        return;
+    }
+    if (event == "HL2_TWO_HAND") {
+        // The off-hand coming onto, or leaving, the weapon.
+        const bool on = (param == "1" || arg(0) == "1");
+        if (on == twoHand_) return;
+        twoHand_ = on;
+        RefreshWeaponState();
+        std::vector<Voice> v;
+        if (twoHand_) {
+            // The hand arrives and the weapon STEADIES. The settle underneath
+            // is the point: what bracing changes is that the thing stops
+            // moving, so the cue resolves downward into stillness rather than
+            // ending on an edge.
+            v.push_back(Transient(320, 0.26f, 9, 6));
+            v.push_back(Body(230, 178, 0.46f, 145, 88));
+        } else {
+            // Letting go. Lighter, shorter, and RISING as the hand leaves.
+            v.push_back(Body(215, 275, 0.30f, 95, 55));
+        }
+        Emit(Controller::Both, std::move(v), "HL2_TWO_HAND");
         return;
     }
     if (event == "HL2_DRYFIRE") {
@@ -772,6 +863,278 @@ void Hl2vrAdapter::Handle(const std::string& event, const std::string& param) {
         Emit(primary_, std::move(v), "RELOAD");
         return;
     }
+    // =====================================================================
+    // MANUAL RELOADING
+    //
+    // Half-Life 2 VR's default reload is a sequence of PHYSICAL ACTIONS, not
+    // one button press. The official manual sets them out per weapon, and they
+    // are separate hand movements separated by however long the player takes:
+    //
+    //   eject the magazine (primary hand button; it falls, and you may CATCH
+    //   it with Grip) -> reach over your shoulder with the OFF hand for a
+    //   fresh one -> insert it, in a way that differs per weapon -> and for a
+    //   weapon run completely dry, chamber a round.
+    //
+    // An earlier revision rendered all of that as ONE event with a multi-stage
+    // waveform, on the reasoning that "Half-Life 2 refills a magazine in a
+    // single step". True of flat Half-Life 2; false of Half-Life 2 VR, which is
+    // the game this adapter is for.
+    //
+    // WHICH HAND MATTERS HERE and is the main reason these are separate events.
+    // The off-hand does the inserting and the chambering while the primary hand
+    // holds the weapon, so an insert is felt in BOTH hands - one pushing, one
+    // resisting - and a magazine retrieved from the shoulder is felt only in
+    // the off-hand. Sending all of it to the primary hand, as the single-event
+    // version did, is wrong about the most basic fact of the gesture.
+    //
+    // HL2_RELOAD is kept, and now means QUICK RELOAD - the game's alternative
+    // one-shot mode, which really is a single event.
+    // =====================================================================
+
+    if (event == "HL2_MAG_EJECT") {
+        // A latch releases and the magazine DROPS AWAY. The whole character is
+        // that something leaves the hand: a small click, then nothing.
+        std::vector<Voice> v;
+        v.push_back(Transient(430, 0.34f, 8, 5));
+        v.push_back(Body(280, 230, 0.44f, 95, 48));
+        Emit(primary_, std::move(v), "RELOAD");
+        triggers_.PushOverlay(primary_, trig::Vibration(9, 5, 210), 60, 7, "click");
+        return;
+    }
+    if (event == "HL2_MAG_CATCH") {
+        // Catching the falling magazine. A small solid arrival in whichever
+        // hand grabbed it - and it is genuinely a catch, so it lands and stops.
+        std::vector<Voice> v;
+        v.push_back(Transient(300, 0.26f, 8, 5));
+        v.push_back(Body(180, 148, 0.50f, 155, 90));
+        Emit(SideFromParam(arg(0)), std::move(v), "RELOAD");
+        return;
+    }
+    if (event == "HL2_MAG_RETRIEVE") {
+        // Reaching over your shoulder and pulling a fresh magazine free.
+        //
+        // OFF hand, and rising: you cannot see it, the hand closes on something
+        // and then it comes away. That upward direction is what separates it
+        // from every other reload step, all of which end in something seating.
+        std::vector<Voice> v;
+        v.push_back(Transient(360, 0.30f, 9, 6));
+        v.push_back(Body(250, 340, 0.52f, 230, 130));
+        Emit(SideFromParam(arg(0).empty() ? std::string() : arg(0)), std::move(v),
+             "RELOAD");
+        return;
+    }
+    if (event == "HL2_MAG_INSERT") {
+        // The magazine going home, per weapon, exactly as the manual describes.
+        //
+        // Emitted to BOTH hands: the off-hand pushes and the primary hand takes
+        // the push. That is the physical truth of the gesture and it is also
+        // what makes an insert unmistakable against everything else in the
+        // sequence, all of which are one-handed.
+        const std::string w = arg(0).empty() ? weapon_ : arg(0);
+        std::vector<Voice> v;
+        if (w == hl2::kSmg) {
+            // A short box magazine: light, fast, high.
+            v.push_back(Transient(470, 0.36f, 9, 5));
+            v.push_back(Body(330, 285, 0.62f, 145, 80));
+        } else if (w == hl2::kAr2) {
+            // "Snap the space-magazine onto the space-magazine well." Not metal
+            // on metal at all - it mates and energises, so it has no hard stop
+            // and instead rises into a hum.
+            auto snap = Tone(300, 430, 0.54f, 195, 60);
+            snap.amDepth = 0.38f;
+            snap.amFreq = 26.0f;
+            v.push_back(snap);
+        } else if (w == hl2::kMagnum) {
+            // A speedloader dropping six rounds in together: several small
+            // impacts at once rather than one seat.
+            for (int i = 0; i < 3; ++i) {
+                auto drop = Body(215, 180, 0.34f, 70, 38);
+                drop.delay = kSampleRate * (i * 26) / 1000;
+                v.push_back(drop);
+            }
+        } else {
+            // Pistol and anything unclassified: into the well, and it stops
+            // dead. The hard stop is the signature.
+            v.push_back(Transient(430, 0.40f, 9, 5));
+            v.push_back(Body(215, 172, 0.70f, 225, 130));
+        }
+        Emit(Controller::Both, std::move(v), "RELOAD");
+        triggers_.PushOverlay(primary_, trig::Vibration(8, 6, 190), 80, 7, "click");
+        return;
+    }
+    if (event == "HL2_CHAMBER") {
+        // Chambering a round on a weapon run completely dry.
+        //
+        // The manual: the pistol's SLIDE is grabbed and pulled back, the SMG's
+        // CHARGING HANDLE is pulled back. Both are the off-hand pulling against
+        // a spring and then the spring winning - so both are two-stage, and the
+        // second stage is the harder one.
+        const std::string w = arg(0).empty() ? weapon_ : arg(0);
+        std::vector<Voice> v;
+        auto stage = [](std::vector<Voice>& out, float tickHz, float tickAmp,
+                        float f0, float f1, float amp, float ms, float decay,
+                        float delayMs) {
+            const int d = static_cast<int>(kSampleRate * delayMs / 1000.0f);
+            auto tick = Transient(tickHz, tickAmp, 9, 5);
+            tick.delay = d;
+            out.push_back(tick);
+            auto body = Body(f0, f1, amp, ms, decay);
+            body.delay = d;
+            out.push_back(body);
+        };
+        if (w == hl2::kSmg) {
+            // A charging handle is a small part on a long spring: lighter than
+            // a slide, and the return is quicker.
+            stage(v, 480, 0.34f, 300, 255, 0.50f, 70, 34, 0);
+            stage(v, 500, 0.46f, 205, 165, 0.68f, 155, 88, 130);
+        } else {
+            // A pistol slide moves real metal and slams into battery harder
+            // than it was pulled. LOW and long, with a wide gap - the two-part
+            // rhythm is what identifies a slide.
+            stage(v, 470, 0.36f, 250, 210, 0.44f, 65, 32, 0);
+            stage(v, 500, 0.54f, 155, 120, 0.82f, 205, 120, 175);
+        }
+        Emit(Controller::Both, std::move(v), "RELOAD");
+        triggers_.PushOverlay(primary_, trig::Vibration(9, 7, 175), 100, 7, "click");
+        return;
+    }
+    if (event == "HL2_PUMP_BACK" || event == "HL2_PUMP_FWD") {
+        // The shotgun pump, as TWO separate actions.
+        //
+        // The manual is explicit: "pull in your off-hand towards your primary
+        // hand, then move it back. If both parts of the pump aren't complete,
+        // the weapon won't fire. (You will hear a sound for each part.)"
+        //
+        // So this is not one mechanism with an internal rhythm - it is two
+        // things the player does, however far apart they choose. Rendering it
+        // as a single two-stage waveform, as an earlier revision did, would
+        // fire the second half before the player had performed it.
+        //
+        // Both are OFF-hand: that hand is doing the pumping.
+        std::vector<Voice> v;
+        if (event == "HL2_PUMP_BACK") {
+            // Drawing it back against the action: friction, then a stop.
+            v.push_back(Transient(360, 0.34f, 9, 5));
+            v.push_back(Body(160, 128, 0.56f, 175, 100));
+            auto drag = Texture(200, 1.2f, 0.16f, 140, 90);
+            drag.delay = kSampleRate * 12 / 1000;
+            v.push_back(drag);
+            triggers_.PushOverlay(primary_, trig::Vibration(6, 5, 160), 90, 7, "click");
+        } else {
+            // Slamming it forward into lockup. The heaviest, lowest thing the
+            // hand does to a weapon in this game.
+            v.push_back(Transient(400, 0.52f, 9, 5));
+            v.push_back(Body(118, 88, 0.88f, 265, 150));
+            triggers_.PushOverlay(primary_, trig::Vibration(8, 7, 130), 120, 7, "click");
+        }
+        Emit(Controller::Both, std::move(v), "RELOAD");
+        return;
+    }
+    if (event == "HL2_CYLINDER") {
+        // The revolver. "Tilt the gun back to empty the previous clip... Flick
+        // your hand to close the chamber."
+        //
+        // Both are PRIMARY hand - this is the one reload in the game the weapon
+        // hand performs on its own - and the flick is the moment: a wrist
+        // action that ends in a hard metallic snap.
+        const bool opening = (arg(0) != "close");
+        std::vector<Voice> v;
+        if (opening) {
+            // The cylinder swings out and the cases fall away. Loose, tumbling,
+            // no hard stop at the end of it.
+            v.push_back(Transient(330, 0.28f, 9, 6));
+            v.push_back(Body(260, 205, 0.46f, 260, 160));
+            auto cases = Texture(300, 1.1f, 0.18f, 200, 140);
+            cases.delay = kSampleRate * 60 / 1000;
+            v.push_back(cases);
+        } else {
+            // The flick. Short, bright, and it STOPS - the whole character is
+            // how abruptly it ends.
+            v.push_back(Transient(500, 0.56f, 9, 5));
+            v.push_back(Body(400, 330, 0.76f, 95, 40));
+        }
+        Emit(primary_, std::move(v), "RELOAD");
+        triggers_.PushOverlay(primary_, trig::Vibration(7, opening ? 5 : 7, 200),
+                              opening ? 90 : 60, 7, "click");
+        return;
+    }
+    if (event == "HL2_BOLT_NOCK") {
+        // The crossbow. "Nock a bolt to the far end of the rail (it will
+        // automatically draw itself back)."
+        //
+        // Two beats and the second is not the player's doing: you seat the
+        // bolt, and then the weapon takes over and hauls the string back by
+        // itself. That handover is the signature, and nothing else in the game
+        // does it.
+        std::vector<Voice> v;
+        v.push_back(Transient(470, 0.36f, 9, 5));
+        v.push_back(Body(330, 280, 0.44f, 90, 48));
+        auto draw = Tone(120, 230, 0.50f, 470, 150);
+        draw.delay = kSampleRate * 110 / 1000;
+        draw.amDepth = 0.32f;
+        draw.amFreq = 9.0f;
+        draw.fmDepth = 13.0f;
+        draw.fmFreq = 17.0f;
+        v.push_back(draw);
+        auto lock = Transient(430, 0.44f, 10, 6);
+        lock.delay = kSampleRate * 580 / 1000;
+        v.push_back(lock);
+        Emit(Controller::Both, std::move(v), "RELOAD");
+        triggers_.PushOverlay(primary_, trig::Slope(0, 9, 2, 7), 560, 6, "draw");
+        return;
+    }
+    if (event == "HL2_ROCKET_LOAD") {
+        // The RPG. "Slide the tail end of the rocket into the front end of the
+        // launcher." One long push against friction, and the heaviest thing
+        // loaded by hand in the game.
+        std::vector<Voice> v;
+        v.push_back(Transient(240, 0.24f, 10, 6));
+        v.push_back(Body(120, 95, 0.74f, 430, 250));
+        auto drag = Texture(180, 1.2f, 0.20f, 380, 240);
+        drag.delay = kSampleRate * 25 / 1000;
+        v.push_back(drag);
+        Emit(Controller::Both, std::move(v), "RELOAD");
+        triggers_.PushOverlay(primary_, trig::Feedback(5, 4), 420, 5, "load");
+        return;
+    }
+
+    // ---- grenades, as the two-stage gesture the game actually uses --------
+    if (event == "HL2_GRENADE_ARM") {
+        // "Press and hold the Trigger of your primary hand to arm the grenade."
+        //
+        // Tension that builds and then WAITS. Nothing resolves here; the throw
+        // does that. The trigger loads progressively under the finger, which is
+        // the closest this hardware gets to a spoon being held down.
+        auto arm = Tone(150, 260, 0.34f, 420, 170);
+        arm.amDepth = 0.30f;
+        arm.amFreq = 7.0f;
+        std::vector<Voice> v{arm};
+        triggers_.PushOverlay(primary_, trig::Slope(0, 9, 2, 7), 3000, 5, "grenade-arm");
+        Emit(primary_, std::move(v), "HL2_GRENADE_ARM");
+        return;
+    }
+    if (event == "HL2_GRENADE_THROW") {
+        // The release at the end of a physical throwing motion. The tension
+        // ends, and the object is gone.
+        triggers_.ClearOverlays(primary_, "grenade-arm");
+        std::vector<Voice> v = profiles_.Build("HL2_GRENADE_FIRE");
+        Emit(primary_, std::move(v), "FIRE");
+        return;
+    }
+
+    // ---- ladders ----------------------------------------------------------
+    if (event == "HL2_LADDER") {
+        // "Grab the ladder by squeezing your Grip button(s) to climb."
+        //
+        // A hand closing on a rung, and deliberately quiet: you do this many
+        // times in a row and it must not accumulate into a drone.
+        std::vector<Voice> v;
+        v.push_back(Transient(340, 0.26f, 9, 6));
+        v.push_back(Body(205, 168, 0.40f, 105, 62));
+        Emit(SideFromParam(arg(0)), std::move(v), "HL2_LADDER");
+        return;
+    }
+
     if (event == "HL2_SHELL") {
         // One shell pressed into the tube. Genuinely observed: the shotgun
         // increments its clip one at a time.
@@ -786,7 +1149,9 @@ void Hl2vrAdapter::Handle(const std::string& event, const std::string& param) {
         drag.delay = kSampleRate * 18 / 1000;
         v.push_back(drag);
         triggers_.PushOverlay(primary_, trig::Vibration(7, 6, 195), 70, 7, "click");
-        Emit(primary_, std::move(v), "RELOAD");
+        // Both hands: the off-hand presses the shell in, the primary hand holds
+        // the weapon steady against it.
+        Emit(Controller::Both, std::move(v), "RELOAD");
         return;
     }
     if (event == "HL2_PUMP") {
@@ -1391,10 +1756,26 @@ std::vector<std::string> Hl2vrAdapter::SelfTestNames() const {
         // The seven firing weapons, plus the two that are not discharges.
         "pistol", "magnum", "smg", "ar2", "shotgun", "shotgun-double",
         "crossbow", "rpg", "grenade", "dry-fire", "pistol-empty",
-        // Reload mechanisms. Each weapon reloads differently and you meet
-        // several of them inside one firefight.
-        "reload-pistol", "reload-smg", "reload-ar2", "reload-magnum",
-        "reload-crossbow", "reload-rpg", "shell-insert", "pump",
+        // Manual reloading, which is Half-Life 2 VR's default and is a
+        // SEQUENCE of physical actions rather than one press. Grouped in the
+        // collision report by weapon, because the steps of one weapon's reload
+        // are performed seconds apart from each other and days apart from
+        // another weapon's.
+        "mag-eject", "mag-catch", "mag-retrieve",
+        "insert-pistol", "insert-smg", "insert-ar2", "insert-magnum",
+        "chamber-pistol", "chamber-smg",
+        "shell-insert", "pump-back", "pump-fwd",
+        "cylinder-open", "cylinder-close",
+        "bolt-nock", "rocket-load",
+        // Quick Reload, the game's alternative one-shot mode. Really is a
+        // single event, so it keeps the single-event signature.
+        "quick-reload",
+        // Bracing the weapon with the off hand.
+        "brace", "unbrace",
+        // Grenades: arm, then throw.
+        "grenade-arm",
+        // Climbing.
+        "ladder",
         // AR2 alternate fire, which is the one two-stage shot in the game.
         "ar2-charge", "ar2-ball",
         // The gravity gun, in the order you actually use it. grab-light against
@@ -1464,14 +1845,38 @@ bool Hl2vrAdapter::RunSelfTest(const std::string& name, const std::string& side)
         return true;
     }
 
-    if (name == "reload-pistol")   { r.Handle("HL2_WEAPON", "weapon_pistol");   r.Handle("HL2_RELOAD", hl2::kPistol);   return true; }
-    if (name == "reload-smg")      { r.Handle("HL2_WEAPON", "weapon_smg1");     r.Handle("HL2_RELOAD", hl2::kSmg);      return true; }
-    if (name == "reload-ar2")      { r.Handle("HL2_WEAPON", "weapon_ar2");      r.Handle("HL2_RELOAD", hl2::kAr2);      return true; }
-    if (name == "reload-magnum")   { r.Handle("HL2_WEAPON", "weapon_357");      r.Handle("HL2_RELOAD", hl2::kMagnum);   return true; }
-    if (name == "reload-crossbow") { r.Handle("HL2_WEAPON", "weapon_crossbow"); r.Handle("HL2_RELOAD", hl2::kCrossbow); return true; }
-    if (name == "reload-rpg")      { r.Handle("HL2_WEAPON", "weapon_rpg");      r.Handle("HL2_RELOAD", hl2::kRpg);      return true; }
-    if (name == "shell-insert")    { r.Handle("HL2_WEAPON", "weapon_shotgun");  r.Handle("HL2_SHELL", "3");             return true; }
-    if (name == "pump")            { r.Handle("HL2_WEAPON", "weapon_shotgun");  r.Handle("HL2_PUMP", "");               return true; }
+    // The manual reload sequence, step by step, exactly as the game performs it.
+    if (name == "mag-eject")     { r.Handle("HL2_WEAPON", "weapon_pistol"); r.Handle("HL2_MAG_EJECT", ""); return true; }
+    if (name == "mag-catch")     { r.Handle("HL2_MAG_CATCH", s); return true; }
+    if (name == "mag-retrieve")  { r.Handle("HL2_MAG_RETRIEVE", s); return true; }
+    if (name == "insert-pistol") { r.Handle("HL2_WEAPON", "weapon_pistol");   r.Handle("HL2_MAG_INSERT", hl2::kPistol); return true; }
+    if (name == "insert-smg")    { r.Handle("HL2_WEAPON", "weapon_smg1");     r.Handle("HL2_MAG_INSERT", hl2::kSmg);    return true; }
+    if (name == "insert-ar2")    { r.Handle("HL2_WEAPON", "weapon_ar2");      r.Handle("HL2_MAG_INSERT", hl2::kAr2);    return true; }
+    if (name == "insert-magnum") { r.Handle("HL2_WEAPON", "weapon_357");      r.Handle("HL2_MAG_INSERT", hl2::kMagnum); return true; }
+    if (name == "chamber-pistol"){ r.Handle("HL2_WEAPON", "weapon_pistol");   r.Handle("HL2_CHAMBER", hl2::kPistol);    return true; }
+    if (name == "chamber-smg")   { r.Handle("HL2_WEAPON", "weapon_smg1");     r.Handle("HL2_CHAMBER", hl2::kSmg);       return true; }
+    if (name == "shell-insert")  { r.Handle("HL2_WEAPON", "weapon_shotgun");  r.Handle("HL2_SHELL", "3");               return true; }
+    if (name == "pump-back")     { r.Handle("HL2_WEAPON", "weapon_shotgun");  r.Handle("HL2_PUMP_BACK", "");            return true; }
+    if (name == "pump-fwd")      { r.Handle("HL2_WEAPON", "weapon_shotgun");  r.Handle("HL2_PUMP_FWD", "");             return true; }
+    if (name == "cylinder-open") { r.Handle("HL2_WEAPON", "weapon_357");      r.Handle("HL2_CYLINDER", "open");         return true; }
+    if (name == "cylinder-close"){ r.Handle("HL2_WEAPON", "weapon_357");      r.Handle("HL2_CYLINDER", "close");        return true; }
+    if (name == "bolt-nock")     { r.Handle("HL2_WEAPON", "weapon_crossbow"); r.Handle("HL2_BOLT_NOCK", "");            return true; }
+    if (name == "rocket-load")   { r.Handle("HL2_WEAPON", "weapon_rpg");      r.Handle("HL2_ROCKET_LOAD", "");          return true; }
+    if (name == "quick-reload")  { r.Handle("HL2_WEAPON", "weapon_pistol");   r.Handle("HL2_RELOAD", hl2::kPistol);     return true; }
+    if (name == "brace")         { r.Handle("HL2_WEAPON", "weapon_smg1");     r.Handle("HL2_TWO_HAND", "1");            return true; }
+    if (name == "unbrace") {
+        r.Handle("HL2_WEAPON", "weapon_smg1");
+        // The precondition is set DIRECTLY rather than by sending TWO_HAND:1,
+        // because that would emit the brace and this case would then measure
+        // it - which is exactly what happened: brace and unbrace both reported
+        // 154 ms / 195 Hz, i.e. the same waveform twice. TWO_HAND only fires on
+        // a change, so the state has to arrive some other way.
+        twoHand_ = true;
+        r.Handle("HL2_TWO_HAND", "0");
+        return true;
+    }
+    if (name == "grenade-arm")   { r.Handle("HL2_WEAPON", "weapon_frag");     r.Handle("HL2_GRENADE_ARM", "");          return true; }
+    if (name == "ladder")        { r.Handle("HL2_LADDER", s); return true; }
 
     if (name == "ar2-charge") { r.Handle("HL2_WEAPON", "weapon_ar2"); r.Handle("HL2_CHARGE_START", hl2::kAr2); return true; }
     if (name == "ar2-ball")   { r.Handle("HL2_WEAPON", "weapon_ar2"); r.Handle("HL2_CHARGE_FIRE",  hl2::kAr2); return true; }
@@ -1560,20 +1965,50 @@ const char* Hl2vrAdapter::AnalyzeFamily(const std::string& n) const {
     // family is the largest in either game and the hardest to keep separated -
     // seven discharges where Alyx had three.
     if (n == "pistol" || n == "magnum" || n == "smg" || n == "ar2" ||
-        n == "shotgun" || n == "crossbow" || n == "rpg" || n == "grenade") {
+        n == "shotgun" || n == "crossbow" || n == "rpg") {
         return "weapons";
     }
+    // The grenade throw belongs with the arming that precedes it, not with the
+    // discharges - it is not one.
+    if (n == "grenade") return "grenade";
     // shotgun-double and pistol-empty are VARIANTS of entries already in the
     // weapons family. They are meant to resemble the shot they modify, so
     // measuring them against it would flag the intended result as a failure.
     if (n.rfind("ar2-", 0) == 0) return "ar2 alt-fire";
-    // Reloads are grouped together rather than per weapon: unlike Alyx, where a
-    // reload is a sequence of steps within one weapon, every Half-Life 2 reload
-    // is a single event and you meet several different ones inside one
-    // firefight as you switch weapons.
-    if (n.rfind("reload-", 0) == 0 || n == "shell-insert" || n == "pump") {
-        return "reloading";
+    // Arming and throwing are one gesture in two halves, seconds apart.
+    if (n == "grenade-arm") return "grenade";
+    // Reload steps are grouped BY WEAPON.
+    //
+    // The grouping rule is co-occurrence, and manual reloading changed what
+    // co-occurs. You eject a pistol magazine, insert a fresh one and rack the
+    // slide within a few seconds of each other, so those three must not feel
+    // alike. A pistol slide and a shotgun forestock are never part of the same
+    // gesture, and forcing them apart would spend real design room solving a
+    // problem the hand does not have.
+    //
+    // An earlier revision lumped every reload into one family, which was
+    // correct while each weapon had a single atomic reload and became wrong the
+    // moment the sequence was modelled properly.
+    if (n == "mag-eject" || n == "mag-catch" || n == "mag-retrieve") {
+        // Weapon-independent: these three happen with every reload, so they are
+        // the steps you meet most often and most need to tell apart.
+        return "magazine handling";
     }
+    if (n == "insert-pistol" || n == "chamber-pistol") return "pistol reload";
+    if (n == "insert-smg" || n == "chamber-smg") return "smg reload";
+    if (n == "shell-insert" || n == "pump-back" || n == "pump-fwd") return "shotgun reload";
+    if (n == "cylinder-open" || n == "cylinder-close" || n == "insert-magnum") {
+        return "revolver reload";
+    }
+    // One step each, and never performed alongside one another - but grouped
+    // anyway, because a family of one measures nothing and these are exactly
+    // the kind of lone effect that drifts.
+    if (n == "insert-ar2" || n == "bolt-nock" || n == "rocket-load") {
+        return "special reloads";
+    }
+    // Bringing the support hand on and taking it off again. You do both
+    // constantly, so this is the pair most worth separating.
+    if (n == "brace" || n == "unbrace") return "bracing";
     if (n.rfind("grav-", 0) == 0) return "gravity gun";
     if (n.rfind("carry-", 0) == 0) return "carrying";
     // melee-swing is excluded on purpose: it is asserted to be SILENT, so it
