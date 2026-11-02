@@ -258,6 +258,10 @@ void TriggerManager::Tick() {
 
 void TriggerManager::ApplyLocked(Controller c) {
     if (!enabled_) return;
+    if (suspend_ != 0) {
+        SendLocked(c, trig::Off(), "paused");
+        return;
+    }
     Side& s = SideFor(c);
 
     const Overlay* top = nullptr;
@@ -298,6 +302,19 @@ void TriggerManager::SendLocked(Controller c, const TriggerCommand& cmd, const s
                   << " (" << label << ") rc=" << rc
                   << " (" << ResultName(rc) << ")\n";
     }
+}
+
+bool TriggerManager::SetSuspended(SuspendReason reason, bool on) {
+    std::lock_guard<std::mutex> lk(mu_);
+    const bool was = suspend_ != 0;
+    if (on) suspend_ |= reason;
+    else suspend_ &= static_cast<uint8_t>(~reason);
+    const bool now = suspend_ != 0;
+    if (now != was) {
+        ApplyLocked(Controller::Left);
+        ApplyLocked(Controller::Right);
+    }
+    return now != was;
 }
 
 void TriggerManager::Reset() {

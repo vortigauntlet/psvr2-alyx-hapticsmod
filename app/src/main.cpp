@@ -2376,6 +2376,13 @@ int Main(int argc, char** argv) {
     auto started = std::chrono::steady_clock::now();
     auto lastStats = started;
     auto lastNetconTry = started;
+    // The game script ticks every 250 ms of GAME time, so ticks stopping means
+    // the game stopped simulating: paused by the SteamVR dashboard, a level
+    // load, or a menu that raised no event. Triggers are released for as long
+    // as that lasts. Only armed once a tick has been seen, so a script that
+    // never ticks (older addon) cannot leave them permanently off.
+    auto lastTick = started;
+    bool sawTick = false;
 
     while (g_running) {
         const auto now = std::chrono::steady_clock::now();
@@ -2463,6 +2470,11 @@ int Main(int argc, char** argv) {
                 continue;
             }
             if (event == "TICK") {
+                lastTick = now;
+                sawTick = true;
+                if (triggers.SetSuspended(TriggerManager::kSuspendStalled, false) && cfg.debug) {
+                    std::cout << "[Triggers] game running again\n";
+                }
                 const auto comma = param.find(',');
                 if (comma != std::string::npos) {
                     try {
@@ -2493,6 +2505,10 @@ int Main(int argc, char** argv) {
             std::cout << "Event sources: " << merged.name() << "\n";
         }
 
+        if (sawTick && now - lastTick > std::chrono::milliseconds(1500) &&
+            triggers.SetSuspended(TriggerManager::kSuspendStalled, true) && cfg.debug) {
+            std::cout << "[Triggers] game paused or stalled - triggers released\n";
+        }
         triggers.Tick();
         hmdChannel.Tick(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());

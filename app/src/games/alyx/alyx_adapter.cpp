@@ -725,6 +725,9 @@ void AlyxAdapter::Handle(const std::string& event, const std::string& param) {
         // stiff trigger. Release it, and restore the exact same state on the
         // way out - which the persistent-base design makes free.
         menuOpen_ = (param == "1");
+        // Suspending (not just resetting) is what keeps a weapon swap or a
+        // recoil overlay arriving mid-menu from re-stiffening the trigger.
+        triggers_.SetSuspended(TriggerManager::kSuspendMenu, menuOpen_);
         if (menuOpen_) triggers_.Reset();
         else RefreshWeaponState();
         return;
