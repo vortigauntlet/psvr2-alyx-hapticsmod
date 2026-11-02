@@ -601,6 +601,11 @@ powershell -ExecutionPolicy Bypass -File .\Package.ps1
 Requires MSVC and CMake ≥ 3.20. The game-side Lua is compiled into the
 executable, so the release is a single self-installing binary.
 
+Build from a short path (for example `C:\b\psvr2`). If the checkout is nested
+deeply enough to pass Windows' 260-character path limit, MSBuild's file tracker
+fails and CMake reports a misleading "No CMAKE_CXX_COMPILER could be found"
+even though Visual Studio is installed.
+
 ## Toolkit compatibility
 
 The PSVR2Toolkit CAPI is explicitly work-in-progress, and the DLL shipped with

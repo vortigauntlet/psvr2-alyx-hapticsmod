@@ -33,12 +33,22 @@ if (-not $cmake) {
 Write-Host "CMake: $cmake" -ForegroundColor DarkGray
 
 Write-Host "Configuring..." -ForegroundColor Cyan
-& $cmake -S "$root\app" -B "$root\app\build" -A x64 | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Configure failed." }
+# Output stays quiet on success but is shown on failure. Discarding it made a
+# failed configure report only "Configure failed.", with the cause (for example
+# MSBuild's file tracker hitting the 260-character path limit in a deeply
+# nested checkout) invisible.
+$log = & $cmake -S "$root\app" -B "$root\app\build" -A x64 2>&1
+if ($LASTEXITCODE -ne 0) {
+    $log | Select-Object -Last 40 | Out-Host
+    throw "Configure failed. If it says no C++ compiler could be found although Visual Studio is installed, the checkout path may be too long for MSBuild (Windows' 260-character limit): build from a shorter path, for example C:\b\psvr2."
+}
 
 Write-Host "Building..." -ForegroundColor Cyan
-& $cmake --build "$root\app\build" --config Release | Out-Null
-if ($LASTEXITCODE -ne 0) { throw "Build failed." }
+$log = & $cmake --build "$root\app\build" --config Release 2>&1
+if ($LASTEXITCODE -ne 0) {
+    $log | Select-Object -Last 40 | Out-Host
+    throw "Build failed."
+}
 
 $exe = "$root\app\build\Release\psvr2_alyx_haptics.exe"
 if (-not (Test-Path $exe)) { throw "Build produced no executable." }
