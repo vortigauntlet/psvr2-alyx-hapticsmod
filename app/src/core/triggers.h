@@ -85,6 +85,18 @@ public:
 
     void Reset();
 
+    // Why the triggers are being held released. Independent reasons, so ending
+    // one (the menu closing) cannot un-release the other (the game still
+    // stalled).
+    enum SuspendReason : uint8_t { kSuspendMenu = 1, kSuspendStalled = 2 };
+
+    // While any reason is active the triggers are forced off. Base profiles and
+    // overlays keep updating underneath, so clearing the last reason restores
+    // exactly the state the game last asked for - and nothing that arrives
+    // while paused (a weapon swap, a recoil overlay) can re-stiffen a trigger
+    // the player is not holding. Returns true if the combined state changed.
+    bool SetSuspended(SuspendReason reason, bool on);
+
     uint64_t commandsSent() const { return sent_; }
     uint64_t commandErrors() const { return errors_; }
 
@@ -113,6 +125,7 @@ private:
     bool debug_ = false;
     std::mutex mu_;
     bool enabled_ = true;
+    uint8_t suspend_ = 0;
     float master_ = 1.0f;
     uint64_t seq_ = 0;
     Side left_;

@@ -638,6 +638,7 @@ void Hl2vrAdapter::Handle(const std::string& event, const std::string& param) {
         // menu is just an unexplained stiff trigger. Release it, and restore
         // the exact same state on the way out.
         menuOpen_ = (param == "1");
+        triggers_.SetSuspended(TriggerManager::kSuspendMenu, menuOpen_);
         if (menuOpen_) triggers_.Reset();
         else RefreshWeaponState();
         return;
